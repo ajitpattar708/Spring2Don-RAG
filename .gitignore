@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ChromaDB
+migration_db/
+*.db
+*.sqlite
+
+# Logs
+*.log
+logs/
+
+# Environment variables
+.env
+.env.local
+
+# Dataset files
+*.dat
+migration_dataset_*.json
+migration_dataset.json
+*.json-sample
+!migration_dataset_sample.json
+
+# Documentation (Block all, allow specific)
+*.md
+!README.md
+!USER_GUIDE.md
+
+# Example Directories (structure only)
+examples/spring/*
+!examples/spring/.gitkeep
+examples/helidon/*
+!examples/helidon/.gitkeep
+
+# Generated Artifacts
+generated/
+knowledge_base.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
