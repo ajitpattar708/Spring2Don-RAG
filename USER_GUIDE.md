@@ -40,6 +40,23 @@ This AI-powered agent automates the migration of legacy Spring Boot applications
     # OPENAI_API_KEY=sk-... (if using OpenAI)
     ```
 
+### Local LLM Configuration (Optional)
+If you prefer to run the agent locally without sending code to external APIs, follow these steps to set up Ollama:
+
+1.  **Install Ollama**: Download from [ollama.com](https://ollama.com/).
+2.  **Pull a Model**: Open your terminal and run:
+    ```bash
+    # We recommend CodeLlama 7B or Llama 3 for best results
+    ollama pull codellama:7b
+    ```
+3.  **Verify**: Ensure Ollama is running (`http://localhost:11434` should be accessible).
+4.  **Update .env**:
+    ```ini
+    LLM_PROVIDER=ollama
+    OLLAMA_MODEL=codellama:7b
+    OLLAMA_BASE_URL=http://localhost:11434
+    ```
+
 ## 🧠 Knowledge Base Setup
 
 You have two options to set up the Agent's AI brain. **Option A is recommended for end-users.**

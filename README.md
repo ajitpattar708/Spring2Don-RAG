@@ -79,8 +79,60 @@ The agent uses a Multi-Agent Orchestrator pattern:
 - **Java** only.
 - Complex Spring Integration flows may require manual review.
 
-## Contributing
-We welcome contributions! Please see the [User Guide](USER_GUIDE.md#contributing) for details on how to generate the dataset locally and submit PRs.
+## 🛠️ Advanced Setup & Customization
+
+### Local LLM Setup (Ollama)
+To run the agent completely offline (privacy-focused) without OpenAI:
+1.  **Install Ollama**: [Download from ollama.com](https://ollama.com/)
+2.  **Pull a Coding Model**:
+    ```bash
+    ollama pull codellama:7b
+    # OR
+    ollama pull llama3
+    ```
+3.  **Update Configuration**: Edit your `.env` file:
+    ```ini
+    LLM_PROVIDER=ollama
+    # Optional: Customize model or URL
+    OLLAMA_MODEL=codellama:7b
+    OLLAMA_BASE_URL=http://localhost:11434
+    ```
+
+### Rebuilding the Knowledge Base (ChromaDB)
+The agent uses a ChromaDB vector database (`migration_db/`) to store migration patterns. To regenerate it from scratch (e.g., after modifying the dataset generator):
+
+1.  **Run Initialization**:
+    ```bash
+    # Generates 10,000+ patterns and loads them into ChromaDB
+    python migration_agent_main.py init
+    ```
+    *   **Generates**: `migration_dataset_production.json`
+    *   **Builds**: `migration_db/` (Vector Store)
+
+## Contributing & Dataset
+We welcome community contributions to the migration knowledge base!
+
+### How to Contribute Patterns
+1.  **Reference the Schema**: Check **`CONTRIBUTING_SAMPLE.json`** in the root directory for the required JSON structure.
+2.  **Add Patterns**:
+    *   **Option A (Preferred)**: Add logic to `src/dataset/production_dataset_generator.py`.
+    *   **Option B**: Create a validated JSON file following the sample schema.
+3.  **Validate**: Run `python migration_agent_main.py init` to ensure your patterns are valid and loadable.
+4.  **Submit PR**: Raise a Pull Request with your changes.
+
+**Sample Pattern Structure:**
+```json
+{
+  "migration_type": "annotation",
+  "spring_pattern": "@RestController",
+  "helidon_pattern": "@Path",
+  "spring_code": "@RestController class Foo {}",
+  "helidon_code": "@Path(\"/\") @ApplicationScoped class Foo {}",
+  "description": "Migrates Spring RestController to JAX-RS Path"
+}
+```
+
+See the [User Guide](USER_GUIDE.md) for more details.
 
 ## License
 This project is licensed under the Apache 2.0 License.
