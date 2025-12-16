@@ -9,6 +9,15 @@ This AI-powered agent automates the migration of legacy Spring Boot applications
 *   **Maven 3.8+**: For dependency management.
 *   **Ollama (Optional)**: If you plan to use local LLM inference (e.g., CodeLlama).
 
+## ⚙️ System Requirements & Performance
+
+*   **Memory (RAM)**: Minimum 8GB recommended (16GB preferred if running local LLMs).
+*   **Disk Space**: ~1GB free space (approx. 600MB for the Knowledge Base).
+*   **Performance Estimates**:
+    *   **Setup**: < 5 minutes (mostly download time).
+    *   **Migration**: Fast (~2-5 seconds per file).
+    *   **Initialization (Dev Mode)**: 10-15 minutes (CPU dependent) to generate embeddings.
+
 ## 🚀 Setup
 
 1.  **Clone the repository**:
@@ -88,12 +97,22 @@ We welcome community contributions! If you find a missing pattern or a better mi
 
 Run the agent pointing to your source Spring Boot project and the desired output directory.
 
+**Option 1: Default (Auto-Detect Versions)**
+This mode detects the Spring Boot version from `pom.xml` and defaults Helidon to 4.x.
 ```bash
 python migration_agent_main.py migrate \
-  /path/to/source/spring-boot-project \
-  /path/to/output/helidon-project \
+  /path/to/source/spring-project \
+  /path/to/target/helidon-project
+```
+
+**Option 2: Explicit Versions (Recommended)**
+Specify exact source and target versions for precise migration patterns.
+```bash
+python migration_agent_main.py migrate \
+  /path/to/source/spring-project \
+  /path/to/target/helidon-project \
   --spring-version 3.4.5 \
-  --helidon-version 4.0.0
+  --helidon-version 4.3.2
 ```
 
 ### Run Tests (Verify Migration Logic)

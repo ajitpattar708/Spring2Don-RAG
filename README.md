@@ -38,11 +38,19 @@ An intelligent AI-powered RAG (Retrieval-Augmented Generation) agent that automa
 ### Basic Usage
 1.  **Clone the Repository**
 2.  **Get the Brain**: Download `knowledge_base.zip` from [Releases](#) and unzip to `migration_db/`.
-3.  **Migrate**:
+3.  **Migrate Project**:
     ```bash
+    # Basic migration (auto-detects versions)
     python migration_agent_main.py migrate \
         /path/to/source-spring-app \
         /path/to/target-helidon-app
+
+    # Migration with Version Specification
+    python migration_agent_main.py migrate \
+        /path/to/source-spring-app \
+        /path/to/target-helidon-app \
+        --spring-version 3.4.5 \
+        --helidon-version 4.3.2
     ```
 
 ## Architecture
