@@ -4,7 +4,8 @@ This AI-powered agent automates the migration of legacy Spring Boot applications
 
 ## 📋 Prerequisites
 
-*   **Python 3.10+**: For running the migration agent.
+*   **Python 3.12.8 (Recommended Stable)** / 3.10 - 3.13: Required for running the migration agent.
+    *   **⛔ Critical Warning**: Python **3.14 and above** are currently **not supported**. This is due to a fundamental incompatibility between modern Python internals and the vector database (ChromaDB/Pydantic V1).
 *   **Java 21**: Required for building Helidon MP 4.x applications.
 *   **Maven 3.8+**: For dependency management.
 *   **Ollama (Optional)**: If you plan to use local LLM inference (e.g., CodeLlama).
@@ -28,7 +29,15 @@ This AI-powered agent automates the migration of legacy Spring Boot applications
 
 2.  **Install dependencies**:
     ```bash
+    # Recommended for all platforms: Python 3.12.8
     pip install -r requirements.txt
+    ```
+
+    ### 🍎 MacOS Setup (Platform Specific)
+    If you are on MacOS (Apple Silicon or Intel), please use the optimized requirements:
+    ```bash
+    pip install -r requirements_mac.txt
+    python -m pip install ollama
     ```
 
 3.  **Configure Environment**:

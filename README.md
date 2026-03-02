@@ -1,6 +1,6 @@
 # Spring Boot to Helidon MP Migration Agent
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12.8 (Recommended)](https://img.shields.io/badge/python-3.12.8-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Helidon](https://img.shields.io/badge/Helidon-4.x-green)](https://helidon.io/)
 [![Status](https://img.shields.io/badge/status-active-green.svg)]()
@@ -31,14 +31,27 @@ An intelligent AI-powered RAG (Retrieval-Augmented Generation) agent that automa
 
 ## Quick Start
 ### Prerequisites
-- Python 3.10+
+- Python 3.12.8 (Recommended Stable) / 3.10 to 3.13 (Supported)
+- *Note: Python 3.14+ is NOT supported due to ChromaDB/Pydantic V1 incompatibility.*
 - Java 21 (for Helidon 4.x)
 - Maven 3.8+
 
 ### Basic Usage
 1.  **Clone the Repository**
-2.  **Get the Brain**: Download `knowledge_base.zip` from [Releases](#) and unzip to `migration_db/`.
-3.  **Migrate Project**:
+    ```bash
+    # For Windows/Linux/MacOS
+    # Note: Python 3.12.8 is the recommended stable version for all platforms
+    pip install -r requirements.txt
+    ```
+
+    ### 🍎 MacOS Additional Step
+    For MacOS users (Silicon or Intel), please use `requirements_mac.txt` and install the ollama client:
+    ```bash
+    pip install -r requirements_mac.txt
+    python -m pip install ollama
+    ```
+3.  **Get the Brain**: Download `knowledge_base.zip` from [Releases](#) and unzip to `migration_db/`.
+4.  **Migrate Project**:
     ```bash
     # Basic migration (auto-detects versions)
     python migration_agent_main.py migrate \
