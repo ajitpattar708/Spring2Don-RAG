@@ -92,7 +92,7 @@ class DependencyAgent:
                 root.remove(parent)
                 logger.info("Removed existing parent POM")
                 
-            # Add Helidon parent
+            # Add Helidon parent near the top for visibility
             self._add_helidon_parent(root, ns)
 
             # 2. Dependency Migration
@@ -173,6 +173,37 @@ class DependencyAgent:
                 # v.text = helidon_version
                 new_deps_map[core_key] = core_dep
                 logger.info("Added missing helidon-microprofile core dependency")
+
+            # Ensure Helidon datasource + Hikari is present when Spring JDBC/Hikari was used
+            spring_datasource_keys = {
+                'spring-boot-starter-jdbc',
+                'spring-boot-starter-data-jpa'
+            }
+            used_spring_datasource = any(
+                (dep.find('maven:artifactId', ns) is not None and
+                 dep.find('maven:artifactId', ns).text in spring_datasource_keys)
+                for dep in current_deps
+            )
+            if used_spring_datasource:
+                ds_key = 'io.helidon.integrations.cdi:helidon-integrations-cdi-datasource'
+                if ds_key not in new_deps_map:
+                    ds_dep = ET.Element('{http://maven.apache.org/POM/4.0.0}dependency')
+                    g = ET.SubElement(ds_dep, '{http://maven.apache.org/POM/4.0.0}groupId')
+                    g.text = 'io.helidon.integrations.cdi'
+                    a = ET.SubElement(ds_dep, '{http://maven.apache.org/POM/4.0.0}artifactId')
+                    a.text = 'helidon-integrations-cdi-datasource'
+                    new_deps_map[ds_key] = ds_dep
+                    logger.info("Added Helidon datasource integration dependency")
+
+                hikari_key = 'com.zaxxer:HikariCP'
+                if hikari_key not in new_deps_map:
+                    hikari_dep = ET.Element('{http://maven.apache.org/POM/4.0.0}dependency')
+                    g = ET.SubElement(hikari_dep, '{http://maven.apache.org/POM/4.0.0}groupId')
+                    g.text = 'com.zaxxer'
+                    a = ET.SubElement(hikari_dep, '{http://maven.apache.org/POM/4.0.0}artifactId')
+                    a.text = 'HikariCP'
+                    new_deps_map[hikari_key] = hikari_dep
+                    logger.info("Added HikariCP dependency for datasource support")
             
             # Sort dependencies (optional but nice)
             sorted_keys = sorted(new_deps_map.keys())
@@ -475,8 +506,8 @@ Important: Use Helidon version {helidon_version} in the response."""
                 logger.info("Helidon parent POM already present")
                 return
         
-        # Add Helidon parent
-        parent = ET.SubElement(root, '{http://maven.apache.org/POM/4.0.0}parent')
+        # Add Helidon parent near the top (after modelVersion if possible)
+        parent = ET.Element('{http://maven.apache.org/POM/4.0.0}parent')
         
         group_id = ET.SubElement(parent, '{http://maven.apache.org/POM/4.0.0}groupId')
         group_id.text = 'io.helidon.microprofile.bundles'
@@ -489,6 +520,16 @@ Important: Use Helidon version {helidon_version} in the response."""
         
         relative_path = ET.SubElement(parent, '{http://maven.apache.org/POM/4.0.0}relativePath')
         relative_path.text = ''
+
+        # Insert parent after modelVersion if present, otherwise at top
+        inserted = False
+        for idx, child in enumerate(list(root)):
+            if child.tag.endswith('modelVersion'):
+                root.insert(idx + 1, parent)
+                inserted = True
+                break
+        if not inserted:
+            root.insert(0, parent)
         
         logger.info(f"Added Helidon parent POM version {helidon_version}")
     

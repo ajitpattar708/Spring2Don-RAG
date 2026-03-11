@@ -39,9 +39,25 @@ class ValidationAgent:
         
         all_passed = all(result['success'] for result in validation_results.values())
         
+        manual_review = self._collect_manual_review(validation_results)
+
         return {
             'success': all_passed,
-            'results': validation_results
+            'results': validation_results,
+            'manual_review': manual_review
+        }
+
+    def _collect_manual_review(self, validation_results: Dict) -> Dict:
+        """Collect manual review items for GA reporting"""
+        issues = []
+        for key in ['imports', 'annotations']:
+            result = validation_results.get(key, {})
+            for issue in result.get('issues', []) or []:
+                issues.append(issue)
+
+        return {
+            'issues_count': len(issues),
+            'issues': issues
         }
     
     def _validate_compilation(self, target_path: Path) -> Dict:

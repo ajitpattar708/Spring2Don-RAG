@@ -10,6 +10,7 @@ import shutil
 import sys
 import time
 import os
+import json
 from src.config.settings import Settings
 from src.utils.logger import setup_logger
 from src.utils.version_compatibility import VersionCompatibility
@@ -51,6 +52,7 @@ class MigrationOrchestrator:
         self.spring_version = spring_version
         self.helidon_version = helidon_version
         self.settings = settings
+        self.settings.validate()
         
         # Set versions in settings for agents to use
         settings.spring_version = spring_version
@@ -99,12 +101,16 @@ class MigrationOrchestrator:
             try:
                 stats = self.dependency_agent.knowledge_base.get_collection_stats('annotations')
                 if stats['count'] == 0:
-                    warning_msg = "WARNING: Knowledge base appears empty. Run 'python migration_agent_main.py init' first."
-                    print(warning_msg)
+                    warning_msg = "Knowledge base appears empty. Run 'python migration_agent_main.py init' first."
+                    if self.settings.require_kb and not self.settings.offline_mode:
+                        raise RuntimeError(warning_msg)
+                    print(f"WARNING: {warning_msg}")
                     logger.warning(warning_msg)
             except Exception as e:
-                warning_msg = f"WARNING: Could not verify knowledge base: {str(e)}"
-                print(warning_msg)
+                warning_msg = f"Could not verify knowledge base: {str(e)}"
+                if self.settings.require_kb and not self.settings.offline_mode:
+                    raise RuntimeError(warning_msg)
+                print(f"WARNING: {warning_msg}")
                 logger.warning(warning_msg)
             
             # ALWAYS clean target directory before migration (even if it doesn't exist, ensure it's clean)
@@ -209,6 +215,18 @@ class MigrationOrchestrator:
             files_migrated = code_result.get('files_migrated', 0)
             transformations_applied = code_result.get('transformations_applied', 0)
             total_time = time.time() - start_time
+
+            # Generate migration report
+            report = self._build_migration_report(
+                files_migrated=files_migrated,
+                transformations_applied=transformations_applied,
+                total_time=total_time,
+                dependency_result=dependency_result,
+                config_result=config_result,
+                code_result=code_result,
+                validation_result=validation_result
+            )
+            self._write_migration_report(report)
             
             print("\n" + "="*70)
             print("MIGRATION COMPLETED SUCCESSFULLY!")
@@ -237,6 +255,50 @@ class MigrationOrchestrator:
                 success=False,
                 error_message=str(e)
             )
+
+    def _build_migration_report(
+        self,
+        files_migrated: int,
+        transformations_applied: int,
+        total_time: float,
+        dependency_result: dict,
+        config_result: dict,
+        code_result: dict,
+        validation_result: dict
+    ) -> dict:
+        """Build a GA-ready migration report"""
+        return {
+            'summary': {
+                'source_path': str(self.source_path),
+                'target_path': str(self.target_path),
+                'spring_version': self.spring_version,
+                'helidon_version': self.helidon_version,
+                'files_migrated': files_migrated,
+                'transformations_applied': transformations_applied,
+                'total_time_seconds': round(total_time, 2)
+            },
+            'dependency_migration': dependency_result,
+            'config_migration': config_result,
+            'code_migration': {
+                'files_migrated': code_result.get('files_migrated'),
+                'transformations_applied': code_result.get('transformations_applied'),
+                'fallback_stats': code_result.get('fallback_stats', {})
+            },
+            'validation': validation_result
+        }
+
+    def _write_migration_report(self, report: dict) -> None:
+        """Write migration report to configured path"""
+        try:
+            report_path = Path(self.settings.migration_report_path)
+            if not report_path.is_absolute():
+                report_path = self.target_path / report_path
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2)
+            logger.info(f"Migration report written to {report_path}")
+        except Exception as e:
+            logger.warning(f"Failed to write migration report: {str(e)}")
     
     def _clean_target_directory(self):
         """Clean the target directory before migration"""
@@ -344,7 +406,7 @@ class MigrationOrchestrator:
             'build_gradle': None
         }
         
-        # Detect build tool
+        # Detect build tool (direct root or nested modules)
         pom_file = base_path / 'pom.xml'
         build_gradle = base_path / 'build.gradle'
         
@@ -354,17 +416,27 @@ class MigrationOrchestrator:
         elif build_gradle.exists():
             structure['build_tool'] = 'gradle'
             structure['build_gradle'] = build_gradle
+        else:
+            # Try to find nested module roots (any subfolder with pom.xml/build.gradle)
+            nested_poms = list(base_path.rglob('pom.xml'))
+            nested_gradles = list(base_path.rglob('build.gradle'))
+            if nested_poms:
+                structure['build_tool'] = 'maven'
+                structure['pom_file'] = nested_poms[0]
+            elif nested_gradles:
+                structure['build_tool'] = 'gradle'
+                structure['build_gradle'] = nested_gradles[0]
         
-        # Find Java source files
+        # Find Java source files (direct root or nested modules)
         java_src_dir = base_path / 'src' / 'main' / 'java'
         if java_src_dir.exists():
             structure['java_files'] = list(java_src_dir.rglob('*.java'))
+        else:
+            structure['java_files'] = list(base_path.rglob('src/main/java/**/*.java'))
         
-        # Find configuration files
-        config_dir = base_path / 'src' / 'main' / 'resources'
-        if config_dir.exists():
-            for config_file in config_dir.rglob('application.*'):
-                structure['config_files'].append(config_file)
+        # Find configuration files (search recursively to handle nested projects)
+        for config_file in base_path.rglob('application.*'):
+            structure['config_files'].append(config_file)
         
         logger.info(f"Detected build tool: {structure['build_tool']}")
         logger.info(f"Found {len(structure['java_files'])} Java files")

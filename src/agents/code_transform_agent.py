@@ -29,6 +29,13 @@ class CodeTransformAgent:
         self.knowledge_base = KnowledgeBase(settings)
         self.embedding_model = EmbeddingModel(settings)
         self.llm_provider = LLMProviderFactory.create(settings)
+        self.fallback_stats = {
+            'embedding_failures': 0,
+            'rag_failures': 0,
+            'llm_failures': 0,
+            'llm_validation_failures': 0,
+            'regex_fallbacks': 0
+        }
         
     def migrate(self, project_structure: Dict, source_path: Path = None, target_path: Path = None) -> Dict:
         """
@@ -92,7 +99,8 @@ class CodeTransformAgent:
         return {
             'success': True,
             'files_migrated': len(migrated_files),
-            'transformations_applied': transformations_applied
+            'transformations_applied': transformations_applied,
+            'fallback_stats': self.fallback_stats
         }
     
     def _migrate_file(self, java_file: Path) -> Dict:
@@ -160,6 +168,8 @@ class CodeTransformAgent:
                 embedding = self.embedding_model.encode_single(source_code[:1000]) # Embed first 1000 chars context
             except Exception as e:
                 logger.warning(f"Embedding generation failed, using fallback: {str(e)}")
+                self.fallback_stats['embedding_failures'] += 1
+                self.fallback_stats['regex_fallbacks'] += 1
                 # Fallback to regex transformation if embedding fails
                 return self._fallback_regex_transform(source_code)
             
@@ -169,6 +179,8 @@ class CodeTransformAgent:
                 anno_results = self.knowledge_base.search('annotations', query_embedding=embedding, top_k=5)
             except Exception as e:
                 logger.warning(f"Knowledge base search failed, using fallback: {str(e)}")
+                self.fallback_stats['rag_failures'] += 1
+                self.fallback_stats['regex_fallbacks'] += 1
                 # Fallback to regex transformation if RAG search fails
                 return self._fallback_regex_transform(source_code)
             
@@ -188,6 +200,7 @@ class CodeTransformAgent:
                 # Use regex transform which now uses vector DB for all mappings
                 migrated_code, _ = self._fallback_regex_transform(source_code)
                 migrated_code = self._post_process_jakarta(migrated_code)
+                migrated_code = self._llm_remediate_spring_apis(migrated_code)
                 return migrated_code, 1
             
             # MEDIUM PATH: Use patterns as context for LLM (similarity 0.7-0.9)
@@ -225,6 +238,8 @@ MIGRATED CODE:"""
                 migrated_code = self.llm_provider.generate(prompt)
             except Exception as e:
                 logger.warning(f"LLM generation failed: {str(e)}, using fallback")
+                self.fallback_stats['llm_failures'] += 1
+                self.fallback_stats['regex_fallbacks'] += 1
                 return self._fallback_regex_transform(source_code)
             
             # 4. Cleanup response
@@ -238,9 +253,12 @@ MIGRATED CODE:"""
                         migrated_code = migrated_code[4:].strip()
                 
                 # Validate migrated code is not empty
-                if migrated_code and len(migrated_code.strip()) > 50:
+                if self._validate_llm_output(migrated_code, source_code):
                     # Post-process: Fix javax->jakarta
                     migrated_code = self._post_process_jakarta(migrated_code)
+
+                    # LLM remediation pass for any remaining Spring-only APIs
+                    migrated_code = self._llm_remediate_spring_apis(migrated_code)
                     
                     # ENVIRONMENT LEARNING: Save new pattern if LLM generated it (no high similarity match)
                     if best_similarity < 0.9:
@@ -249,16 +267,88 @@ MIGRATED CODE:"""
                     return migrated_code, 1
                 else:
                     logger.warning("LLM returned empty or invalid code, using fallback")
+                    self.fallback_stats['llm_validation_failures'] += 1
+                    self.fallback_stats['regex_fallbacks'] += 1
                     return self._fallback_regex_transform(source_code)
             else:
                 logger.warning("LLM returned None, using fallback")
+                self.fallback_stats['llm_validation_failures'] += 1
+                self.fallback_stats['regex_fallbacks'] += 1
                 return self._fallback_regex_transform(source_code)
             
         except Exception as e:
             logger.error(f"LLM migration failed: {e}", exc_info=True)
             # Fallback to regex transformation if LLM fails
             logger.info("Falling back to regex transformation...")
-            return self._fallback_regex_transform(source_code)
+            self.fallback_stats['llm_failures'] += 1
+            self.fallback_stats['regex_fallbacks'] += 1
+            fallback_code, fallback_count = self._fallback_regex_transform(source_code)
+            fallback_code = self._llm_remediate_spring_apis(fallback_code)
+            return fallback_code, fallback_count
+
+    def _llm_remediate_spring_apis(self, code: str) -> str:
+        """LLM remediation pass to replace remaining Spring-only APIs with Helidon/JAX-RS equivalents."""
+        spring_markers = [
+            'ResponseErrorHandler',
+            'ClientHttpResponse',
+            'RestTemplateBuilder',
+            'ProxyProperties',
+            'HttpStatus',
+            'HttpHeaders',
+            'HttpMethod',
+            'org.springframework'
+        ]
+        if not any(marker in code for marker in spring_markers):
+            return code
+
+        helidon_version = self.settings.helidon_version or "4.3.2"
+        prompt = f"""You are migrating Spring Boot code to Helidon MP {helidon_version}.
+Rewrite the code to remove any remaining Spring-only APIs (ResponseErrorHandler, RestTemplateBuilder,
+ProxyProperties, ClientHttpResponse, HttpStatus, HttpHeaders, HttpMethod). Use JAX-RS ClientResponseFilter
+or Helidon-compatible alternatives. Return ONLY valid Java code with no Spring imports.
+
+SOURCE:
+```java
+{code}
+```
+
+MIGRATED CODE:"""
+
+        try:
+            remediated = self.llm_provider.generate(prompt)
+            if remediated:
+                match = re.search(r'```java\n(.*?)\n```', remediated, re.DOTALL)
+                if match:
+                    remediated = match.group(1)
+                elif remediated.strip().startswith("```"):
+                    remediated = remediated.strip().strip("`")
+                    if remediated.startswith("java"):
+                        remediated = remediated[4:].strip()
+
+                if self._validate_llm_output(remediated, code):
+                    return self._post_process_jakarta(remediated)
+        except Exception as e:
+            logger.warning(f"LLM remediation failed: {str(e)}")
+
+        return code
+
+    def _validate_llm_output(self, migrated_code: str, source_code: str) -> bool:
+        """Validate LLM output for basic GA guardrails"""
+        if not migrated_code or not migrated_code.strip():
+            return False
+
+        # Must include a class or interface
+        if not re.search(r'\b(class|interface)\s+\w+', migrated_code):
+            return False
+
+        if self.settings.llm_validation_strict:
+            # Avoid returning the exact source unchanged
+            if migrated_code.strip() == source_code.strip():
+                return False
+            # Should not include Spring imports in strict mode
+            if 'org.springframework' in migrated_code:
+                return False
+        return True
     
     def _apply_pattern_directly(self, source_code: str, pattern_match: dict) -> str:
         """
@@ -396,6 +486,7 @@ MIGRATED CODE:"""
         # 1. Specific Framework Transformations (BEFORE general cleanup)
         # Transform Spring Cloud Gateway (creates side-effect files)
         transformed_code = self._transform_cloud_gateway(transformed_code)
+        transformed_code = self._transform_microprofile_configproperty(transformed_code)
         
         # 2. General Transformations
         t_code, c1 = self._transform_annotations(transformed_code)
@@ -411,6 +502,22 @@ MIGRATED CODE:"""
         t_code = self._ensure_imports(t_code)
         
         return t_code, c1 + c2 + c3
+
+    def _transform_microprofile_configproperty(self, code: str) -> str:
+        """Convert Spring-style ConfigProperty placeholders to MicroProfile style"""
+        # @ConfigProperty("${key}") -> @ConfigProperty(name = "key")
+        code = re.sub(
+            r'@ConfigProperty\(\s*"\$\{([^}]+)\}"\s*\)',
+            r'@ConfigProperty(name = "\1")',
+            code
+        )
+        # @ConfigProperty("key") -> @ConfigProperty(name = "key")
+        code = re.sub(
+            r'@ConfigProperty\(\s*"([^"]+)"\s*\)',
+            r'@ConfigProperty(name = "\1")',
+            code
+        )
+        return code
 
     def _transform_spring_configuration(self, code: str) -> str:
         """Transform Spring @Configuration classes to CDI"""
@@ -507,6 +614,26 @@ MIGRATED CODE:"""
         # Cleanup wrong Produces
         if 'import jakarta.enterprise.inject.Produces;' in code and 'import jakarta.ws.rs.Produces;' in code:
             code = code.replace('import jakarta.ws.rs.Produces;\n', '')
+
+        # Replace Spring-style ApplicationScopedProperties with MicroProfile ConfigProperties
+        if re.search(r'@ApplicationScopedProperties\("spring\.datasource\.hikari"\)', code):
+            datasource_name = self.settings.datasource_name or 'default'
+            code = re.sub(
+                r'@ApplicationScopedProperties\("spring\.datasource\.hikari"\)\s*',
+                f'@ConfigProperties(prefix = "javax.sql.DataSource.{datasource_name}")\n',
+                code
+            )
+            if 'import org.eclipse.microprofile.config.inject.ConfigProperties;' not in code:
+                code = re.sub(
+                    r'package\s+[^;]+;\s*\n',
+                    lambda m: m.group(0) + '\nimport org.eclipse.microprofile.config.inject.ConfigProperties;\n',
+                    code
+                )
+        else:
+            code = re.sub(r'@ApplicationScopedProperties\([^)]*\)\s*\n?', '', code)
+        code = re.sub(r'import\s+org\.springframework\.boot\.context\.properties\.ConfigurationProperties;\s*\n?', '', code)
+        # Remove any leftover custom ApplicationScopedProperties import
+        code = re.sub(r'import\s+.*ApplicationScopedProperties;\s*\n?', '', code)
             
         return code
 
@@ -557,6 +684,18 @@ MIGRATED CODE:"""
             code = code.replace('HttpStatus.BAD_REQUEST', 'Response.Status.BAD_REQUEST')
             code = code.replace('HttpStatus.INTERNAL_SERVER_ERROR', 'Response.Status.INTERNAL_SERVER_ERROR')
             count += 1
+
+        # 3. new Response<>(Response.Status.X) -> Response.status(Response.Status.X).build()
+        code = re.sub(
+            r'new\s+Response\s*<[^>]*>\s*\(\s*Response\.Status\.([A-Z_]+)\s*\)',
+            r'Response.status(Response.Status.\1).build()',
+            code
+        )
+        code = re.sub(
+            r'new\s+Response\s*\(\s*Response\.Status\.([A-Z_]+)\s*\)',
+            r'Response.status(Response.Status.\1).build()',
+            code
+        )
             
         return code, count
     
@@ -791,9 +930,18 @@ MIGRATED CODE:"""
         # Remove @SpringBootApplication if still present
         code = re.sub(r'@SpringBootApplication\s*\n', '', code)
         code = re.sub(r'@SpringBootApplication', '', code)
+        code = re.sub(r'@ComponentScan\([^)]*\)\s*\n', '', code)
+        code = re.sub(r'@EntityScan\([^)]*\)\s*\n', '', code)
+        code = re.sub(r'@EnableJpaRepositories\([^)]*\)\s*\n', '', code)
+        code = re.sub(r'@ComponentScan\s*\n', '', code)
+        code = re.sub(r'@EntityScan\s*\n', '', code)
+        code = re.sub(r'@EnableJpaRepositories\s*\n', '', code)
         
         # Remove Spring Boot imports
         code = re.sub(r'import\s+org\.springframework\.boot\.[^;]+;\s*\n?', '', code)
+        code = re.sub(r'import\s+org\.springframework\.context\.annotation\.ComponentScan;\s*\n?', '', code)
+        code = re.sub(r'import\s+org\.springframework\.boot\.autoconfigure\.domain\.EntityScan;\s*\n?', '', code)
+        code = re.sub(r'import\s+org\.springframework\.data\.jpa\.repository\.config\.EnableJpaRepositories;\s*\n?', '', code)
         
         # 1. Add JAX-RS Application imports if missing
         if 'jakarta.ws.rs.core.Application' not in code:
@@ -811,8 +959,13 @@ MIGRATED CODE:"""
             
         # 2. Make class extend Application and add @ApplicationPath
         # Only if it doesn't already extend something
-        if 'public class DemoApplication' in code and 'extends' not in code:
-            code = code.replace('public class DemoApplication', '@ApplicationPath("/")\npublic class DemoApplication extends Application')
+        class_match = re.search(r'public\s+class\s+(\w+)', code)
+        if class_match and 'extends' not in class_match.group(0):
+            class_name = class_match.group(1)
+            code = code.replace(
+                f'public class {class_name}',
+                f'@ApplicationPath("/")\npublic class {class_name} extends Application'
+            )
             
         # 3. Replace SpringApplication.run() with Helidon MP main
         if 'SpringApplication.run' in code:
@@ -1095,9 +1248,18 @@ public class {class_name} {{
         if not hasattr(self, 'target_path') or not self.target_path:
             return
 
+        # Determine module root by locating nearest pom.xml
+        module_root = self.target_path
+        try:
+            for pom in self.target_path.rglob('pom.xml'):
+                module_root = pom.parent
+                break
+        except Exception:
+            module_root = self.target_path
+
         # Determine path
         package_path = package_name.replace('.', '/')
-        output_file = self.target_path / 'src/main/java' / package_path / 'ProxyExchange.java'
+        output_file = module_root / 'src/main/java' / package_path / 'ProxyExchange.java'
         
         # Create directory
         output_file.parent.mkdir(parents=True, exist_ok=True)
