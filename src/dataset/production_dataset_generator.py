@@ -52,6 +52,9 @@ class ProductionDatasetGenerator:
         
         logger.info("Generating code pattern variations...")
         all_patterns.extend(self._generate_code_pattern_variations())
+
+        logger.info("Generating curated controller rescue patterns...")
+        all_patterns.extend(self._generate_curated_controller_patterns())
         
         logger.info("Generating learned patterns (from manual fixes)...")
         all_patterns.extend(self._generate_learned_code_patterns())
@@ -72,6 +75,292 @@ class ProductionDatasetGenerator:
         
         logger.info(f"Generated {len(all_patterns)} total patterns")
         return all_patterns
+
+    def _generate_curated_controller_patterns(self) -> List[Dict]:
+        """Curated high-value controller patterns that are safer as retrieved templates than pure heuristics."""
+        patterns = []
+
+        patterns.append({
+            "id": f"curated-pattern-{self._next_id()}",
+            "migration_type": "code_pattern",
+            "spring_pattern": "Spring wildcard proxy controller with ProxyExchange and servlet request",
+            "helidon_pattern": "Helidon MP resource with injected ProxyExchange and @Context request",
+            "spring_code": """@RestController
+@RequestMapping("/api-admin")
+public class AdminController {
+    @RequestMapping(value = { "/{version}/{accessKey}/admin/artifact", "/{version}/{accessKey}/admin/artifact/**" })
+    public ResponseEntity<String> proxyArtifactPath(ProxyExchange<?> proxy, HttpServletRequest request,
+            @RequestHeader(value = REQUEST_ID_HEADER, required = false) String xRequestId) {
+        return adminService.proxyArtifactPath(request, mcpsBaseUrl, xRequestId);
+    }
+}""",
+            "helidon_code": """@Path("/api-admin")
+@ApplicationScoped
+public class AdminController {
+    @Inject
+    private ProxyExchange proxy;
+
+    @Path("/{version}/{accessKey}/admin/artifact{path: (/.*)?}")
+    public Response proxyArtifactPath(@Context HttpServletRequest request,
+            @HeaderParam(REQUEST_ID_HEADER) String xRequestId) {
+        return adminService.proxyArtifactPath(request, mcpsBaseUrl, xRequestId);
+    }
+}""",
+            "source_framework": "Spring Boot",
+            "target_framework": "Helidon MP",
+            "spring_version": "3.4.5",
+            "helidon_version": self.helidon_version_range,
+            "description": "Wildcard proxy controller rescue pattern",
+            "explanation": "Use a curated template for proxy controllers with wildcard paths, ProxyExchange injection, and servlet request context.",
+            "complexity": "high",
+            "category": "controller_proxy"
+        })
+
+        patterns.append({
+            "id": f"curated-pattern-{self._next_id()}",
+            "migration_type": "code_pattern",
+            "spring_pattern": "Spring form-urlencoded proxy endpoint",
+            "helidon_pattern": "Helidon MP form proxy endpoint",
+            "spring_code": """@RequestMapping(value="/ords/**", method=RequestMethod.POST, consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
+public ResponseEntity<?> proxyPathORDSForm(ProxyExchange<byte[]> proxy, HttpServletRequest request,
+        @RequestParam MultiValueMap<String, String> formData,
+        @RequestHeader(value = REQUEST_ID_HEADER, required = false) String xRequestId) {
+    return adminService.getProxy(request, mcpsBaseUrl, xRequestId, proxy);
+}""",
+            "helidon_code": """@POST
+@Path("/ords{path: (/.*)?}")
+@Consumes(MediaType.APPLICATION_FORM_URLENCODED)
+public Response proxyPathORDSForm(@Context HttpServletRequest request,
+        MultivaluedMap<String, String> formData,
+        @HeaderParam(REQUEST_ID_HEADER) String xRequestId) {
+    return adminService.getProxy(request, mcpsBaseUrl, xRequestId, proxy);
+}""",
+            "source_framework": "Spring Boot",
+            "target_framework": "Helidon MP",
+            "spring_version": "3.4.5",
+            "helidon_version": self.helidon_version_range,
+            "description": "Form-url-encoded proxy controller migration",
+            "explanation": "Form proxy routes need deterministic @POST, wildcard JAX-RS path, and non-Spring form parameter types.",
+            "complexity": "high",
+            "category": "controller_form_proxy"
+        })
+
+        patterns.append({
+            "id": f"curated-pattern-{self._next_id()}",
+            "migration_type": "code_pattern",
+            "spring_pattern": "Spring UriComponentsBuilder target URI composition",
+            "helidon_pattern": "Jakarta UriBuilder target URI composition",
+            "spring_code": """public URI composeTargetUri(HttpServletRequest request, String mcpsBaseUrl) {
+    UriComponentsBuilder uri = UriComponentsBuilder.newInstance()
+            .scheme(mcps.getScheme())
+            .host(mcps.getHost())
+            .path(request.getRequestURI())
+            .query(queryParams);
+    return uri.build().toUri();
+}""",
+            "helidon_code": """public URI composeTargetUri(HttpServletRequest request, String mcpsBaseUrl) {
+    return UriBuilder.fromUri(mcpsBaseUrl)
+            .path(request.getRequestURI())
+            .replaceQuery(queryParams)
+            .build();
+}""",
+            "source_framework": "Spring Boot",
+            "target_framework": "Helidon MP",
+            "spring_version": "3.4.5",
+            "helidon_version": self.helidon_version_range,
+            "description": "Servlet request URI builder migration",
+            "explanation": "Use Jakarta UriBuilder instead of Spring UriComponentsBuilder for MP-compatible target URI composition.",
+            "complexity": "medium",
+            "category": "request_context"
+        })
+
+        patterns.append({
+            "id": f"curated-pattern-{self._next_id()}",
+            "migration_type": "code_pattern",
+            "spring_pattern": "Spring proxy service with servlet request and ProxyExchange",
+            "helidon_pattern": "Helidon MP proxy service with servlet request context and compatibility shim",
+            "spring_code": """public ResponseEntity<?> getProxy(HttpServletRequest request, String mcpsBaseUrl, String xRequestId, ProxyExchange<?> proxy) {
+    URI uri = composeTargetUri(request, mcpsBaseUrl);
+    return forward(proxy, request, keystoneParams, xRequestId);
+}""",
+            "helidon_code": """public Response getProxy(HttpServletRequest request, String mcpsBaseUrl, String xRequestId, ProxyExchange<?> proxy) {
+    URI uri = composeTargetUri(request, mcpsBaseUrl);
+    return forward(proxy, request, keystoneParams, xRequestId);
+}""",
+            "source_framework": "Spring Boot",
+            "target_framework": "Helidon MP",
+            "spring_version": "3.4.5",
+            "helidon_version": self.helidon_version_range,
+            "description": "Proxy service compatibility pattern",
+            "explanation": "Keep servlet request context and forward through a Helidon MP compatible ProxyExchange shim while the service layer is stabilized.",
+            "complexity": "high",
+            "category": "proxy_service"
+        })
+
+        patterns.append({
+            "id": f"curated-pattern-{self._next_id()}",
+            "migration_type": "code_pattern",
+            "spring_pattern": "Spring ProxyExchange body/header mutation",
+            "helidon_pattern": "Helidon MP ProxyExchange shim mutation",
+            "spring_code": """proxy.header("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8");
+proxy.body(body.getBytes(StandardCharsets.UTF_8));
+return adminService.getProxy(request, mcpsBaseUrl, xRequestId, proxy);""",
+            "helidon_code": """proxy.header("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8");
+proxy.entity(body.getBytes(StandardCharsets.UTF_8));
+return adminService.getProxy(request, mcpsBaseUrl, xRequestId, proxy);""",
+            "source_framework": "Spring Boot",
+            "target_framework": "Helidon MP",
+            "spring_version": "3.4.5",
+            "helidon_version": self.helidon_version_range,
+            "description": "Proxy request mutation pattern",
+            "explanation": "Carry forward request-body and header mutation through the compatibility shim for proxy endpoints.",
+            "complexity": "medium",
+            "category": "proxy_service"
+        })
+
+        patterns.append({
+            "id": f"curated-pattern-{self._next_id()}",
+            "migration_type": "code_pattern",
+            "spring_pattern": "Spring Hikari datasource config backed by OCI Vault secret service",
+            "helidon_pattern": "Helidon MP datasource config with CDI injection and MicroProfile config properties",
+            "spring_code": """@Configuration
+@ConfigurationProperties("spring.datasource.hikari")
+public class DatabaseConfig extends HikariConfig {
+    @Autowired
+    private VaultSecretService vaultSecretService;
+
+    @Value("${cxunity.app.vaultSecret.key}")
+    private String secretKey;
+
+    @Bean
+    public DataSource dataSource() {
+        this.setPassword(vaultSecretService.getSecret(compartmentOcid, secretKey));
+        return new HikariDataSource(this);
+    }
+}""",
+            "helidon_code": """@ApplicationScoped
+@ConfigProperties(prefix = "javax.sql.DataSource.myDS")
+public class DatabaseConfig extends HikariConfig {
+    @Inject
+    private VaultSecretService vaultSecretService;
+
+    @ConfigProperty(name = "cxunity.app.vaultSecret.key")
+    private String secretKey;
+
+    @Produces
+    public DataSource dataSource() {
+        this.setPassword(vaultSecretService.getSecret(compartmentOcid, secretKey));
+        return new HikariDataSource(this);
+    }
+}""",
+            "source_framework": "Spring Boot",
+            "target_framework": "Helidon MP",
+            "spring_version": "3.4.5",
+            "helidon_version": self.helidon_version_range,
+            "description": "OCI Vault-backed datasource migration",
+            "explanation": "Keep Vault SDK/service logic but move property injection and bean wiring to CDI/MicroProfile Config for Helidon MP 4.x.",
+            "complexity": "high",
+            "category": "datasource_vault"
+        })
+
+        patterns.append({
+            "id": f"curated-pattern-{self._next_id()}",
+            "migration_type": "code_pattern",
+            "spring_pattern": "Spring JdbcTemplate repository method",
+            "helidon_pattern": "Helidon MP CDI repository using injected javax.sql.DataSource",
+            "spring_code": """@Repository
+public class OrderRepository {
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    public List<Order> findAll() {
+        return jdbcTemplate.query("select * from orders", orderRowMapper);
+    }
+}""",
+            "helidon_code": """@ApplicationScoped
+public class OrderRepository {
+    @Inject
+    @Named("myDS")
+    private javax.sql.DataSource dataSource;
+
+    public List<Order> findAll() throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("select * from orders");
+             ResultSet rs = statement.executeQuery()) {
+            return mapOrders(rs);
+        }
+    }
+}""",
+            "source_framework": "Spring Boot",
+            "target_framework": "Helidon MP",
+            "spring_version": "3.4.5",
+            "helidon_version": self.helidon_version_range,
+            "description": "JdbcTemplate repository migration",
+            "explanation": "JdbcTemplate-heavy repositories should use curated repository templates instead of heuristic line edits because resource handling must remain correct.",
+            "complexity": "high",
+            "category": "jdbc_repository"
+        })
+
+        patterns.append({
+            "id": f"curated-pattern-{self._next_id()}",
+            "migration_type": "code_pattern",
+            "spring_pattern": "Spring proxy service reading HttpServletRequest metadata",
+            "helidon_pattern": "Helidon MP proxy helper using JAX-RS request metadata abstraction",
+            "spring_code": """public ResponseEntity<?> getProxy(HttpServletRequest request, String mcpsBaseUrl, String xRequestId, ProxyExchange<?> proxy) {
+    String method = request.getMethod();
+    String path = request.getRequestURI();
+    String query = request.getQueryString();
+    String appName = request.getHeader(APPNAME_HEADER);
+    return forward(proxy, request, method, path, query, appName);
+}""",
+            "helidon_code": """public Response getProxy(ProxyRequestContext request, String mcpsBaseUrl, String xRequestId, ProxyExchange<?> proxy) {
+    String method = request.getMethod();
+    String path = request.getRequestUri();
+    String query = request.getQueryString();
+    String appName = request.getHeader(APPNAME_HEADER);
+    return forward(proxy, request, method, path, query, appName);
+}""",
+            "source_framework": "Spring Boot",
+            "target_framework": "Helidon MP",
+            "spring_version": "3.4.5",
+            "helidon_version": self.helidon_version_range,
+            "description": "Proxy request metadata abstraction",
+            "explanation": "For Helidon MP 4.x, prefer a JAX-RS-backed request abstraction over carrying servlet request types through proxy/service layers.",
+            "complexity": "high",
+            "category": "proxy_request_context"
+        })
+
+        patterns.append({
+            "id": f"curated-pattern-{self._next_id()}",
+            "migration_type": "code_pattern",
+            "spring_pattern": "Spring OCI Vault SDK bean and secret-backed configuration",
+            "helidon_pattern": "Helidon MP CDI producer for OCI Vault SDK client and secret services",
+            "spring_code": """@Configuration
+public class VaultConfig {
+    @Bean
+    public VaultsClient vaultsClient(AuthenticationDetailsProvider provider) {
+        return new VaultsClient(provider);
+    }
+}""",
+            "helidon_code": """@ApplicationScoped
+public class VaultConfig {
+    @Produces
+    @ApplicationScoped
+    public VaultsClient vaultsClient(AuthenticationDetailsProvider provider) {
+        return new VaultsClient(provider);
+    }
+}""",
+            "source_framework": "Spring Boot",
+            "target_framework": "Helidon MP",
+            "spring_version": "3.4.5",
+            "helidon_version": self.helidon_version_range,
+            "description": "OCI Vault SDK producer migration",
+            "explanation": "OCI SDK clients should migrate as CDI producers so secret access remains centralized and reusable across Helidon MP services.",
+            "complexity": "medium",
+            "category": "oci_vault_sdk"
+        })
+
+        return patterns
 
     def _generate_learned_code_patterns(self) -> List[Dict]:
         """Generate patterns learned from manual fixes"""
@@ -147,7 +436,7 @@ public ResponseEntity<?> proxy(ProxyExchange<byte[]> proxy) throws Exception {
     return proxy.uri("http://example.com/" + path).get();
 }""",
              "helidon_code": """@GET
-@Path("/proxy/{path: .*}")
+@Path("/proxy{path: (/.*)?}")
 public Response proxy(@PathParam("path") String path) {
     // Manual proxy implementation using JAX-RS Client
     Client client = ClientBuilder.newClient();
@@ -411,7 +700,7 @@ private String appName;""",
             },
             {
                 "spring": "spring-boot-starter-test",
-                "helidon": "io.helidon.microprofile.tests:helidon-microprofile-tests-junit5",
+                "helidon": "io.helidon.microprofile.testing:helidon-microprofile-testing-junit5",
                 "description": "Testing dependency"
             },
             {
@@ -753,4 +1042,3 @@ public class {entity}Controller {{
             json.dump(patterns, f, indent=2, ensure_ascii=False)
         
         logger.info(f"Saved {len(patterns)} patterns to {filepath}")
-

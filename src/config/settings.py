@@ -5,7 +5,11 @@ Configuration settings for the migration agent
 import os
 from typing import Optional
 from dataclasses import dataclass
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - exercised through import fallback tests
+    def load_dotenv(*args, **kwargs):
+        return False
 
 # Load environment variables from .env file
 load_dotenv()
@@ -75,4 +79,3 @@ class Settings:
                     "Set REQUIRE_LLM_CONSENT=false to override."
                 )
         return True
-

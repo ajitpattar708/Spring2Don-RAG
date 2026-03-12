@@ -4,11 +4,16 @@ Manages ChromaDB vector database for migration patterns
 """
 
 from typing import List, Dict, Optional
-import chromadb
-from chromadb.config import Settings as ChromaSettings
 from pathlib import Path
 from src.config.settings import Settings
 from src.utils.logger import setup_logger
+
+try:
+    import chromadb
+    from chromadb.config import Settings as ChromaSettings
+except ImportError:  # pragma: no cover - exercised through import fallback tests
+    chromadb = None
+    ChromaSettings = None
 
 logger = setup_logger(__name__)
 
@@ -20,10 +25,16 @@ class KnowledgeBase:
         self.settings = settings
         self.client = None
         self.collections = {}
+        self.available = chromadb is not None
         self._initialize()
     
     def _initialize(self):
         """Initialize ChromaDB client and collections"""
+        if chromadb is None or ChromaSettings is None:
+            self.available = False
+            logger.warning("chromadb is not installed; continuing with deterministic migration mode only")
+            return
+
         try:
             print("--- Initializing ChromaDB ---", flush=True)
             # Create persistent client
@@ -41,8 +52,10 @@ class KnowledgeBase:
             logger.info(f"Knowledge base initialized at: {self.settings.chromadb_path}")
             
         except Exception as e:
-            logger.error(f"Failed to initialize knowledge base: {str(e)}")
-            raise
+            self.available = False
+            self.client = None
+            self.collections = {}
+            logger.warning(f"Failed to initialize knowledge base, continuing without vector search: {str(e)}")
     
     def _create_collections(self):
         """Create ChromaDB collections for different pattern types"""
@@ -74,6 +87,10 @@ class KnowledgeBase:
             collection_name: Name of the collection
             patterns: List of pattern dictionaries with 'id', 'text', 'embedding', 'metadata'
         """
+        if not self.available:
+            logger.debug("Skipping add_patterns because knowledge base is unavailable")
+            return
+
         if collection_name not in self.collections:
             raise ValueError(f"Collection '{collection_name}' not found")
         
@@ -124,6 +141,10 @@ class KnowledgeBase:
         Returns:
             List of similar patterns with scores
         """
+        if not self.available:
+            logger.debug("Knowledge base unavailable; returning no vector search results")
+            return []
+
         if collection_name not in self.collections:
             raise ValueError(f"Collection '{collection_name}' not found")
         
@@ -182,6 +203,12 @@ class KnowledgeBase:
     
     def get_collection_stats(self, collection_name: str) -> Dict:
         """Get statistics for a collection"""
+        if not self.available:
+            return {
+                'name': collection_name,
+                'count': 0
+            }
+
         if collection_name not in self.collections:
             raise ValueError(f"Collection '{collection_name}' not found")
         
@@ -192,4 +219,3 @@ class KnowledgeBase:
             'name': collection_name,
             'count': count
         }
-

@@ -4,15 +4,29 @@ Handles code embedding generation using CodeBERT and fallback models
 """
 
 from typing import List, Optional
-import torch
-from sentence_transformers import SentenceTransformer
+import os
+import hashlib
+import math
+import random
 from src.config.settings import Settings
 from src.utils.logger import setup_logger
 
+try:
+    import torch
+except ImportError:  # pragma: no cover - exercised through import fallback tests
+    torch = None
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:  # pragma: no cover - exercised through import fallback tests
+    SentenceTransformer = None
+
 logger = setup_logger(__name__)
 
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 # Detect device
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
 logger.info(f"Using device: {DEVICE}")
 
 
@@ -23,9 +37,13 @@ class EmbeddingModel:
         self.settings = settings
         self.model = None
         self.fallback_model = None
+        self.offline_mode = True
         # Try to load model unless offline mode is explicitly requested in settings
         if getattr(self.settings, 'offline_mode', False):
             logger.info("Offline mode requested in settings")
+            self.offline_mode = True
+        elif SentenceTransformer is None:
+            logger.warning("sentence-transformers is not installed; using deterministic offline embeddings")
             self.offline_mode = True
         else:
             try:
@@ -70,21 +88,16 @@ class EmbeddingModel:
             
         # Offline mode support
         if getattr(self, 'offline_mode', False):
-            import hashlib
-            import numpy as np
-            
             logger.debug("Generating dummy embeddings in offline mode")
             embeddings = []
             dim = self.get_dimension()
             
             for text in texts:
-                # Deterministic random vector based on text hash
                 seed = int(hashlib.sha256(text.encode('utf-8')).hexdigest(), 16) % (2**32)
-                np.random.seed(seed)
-                # Generate normalized vector
-                vec = np.random.rand(dim)
-                vec = vec / np.linalg.norm(vec)
-                embeddings.append(vec.tolist())
+                rng = random.Random(seed)
+                vec = [rng.random() for _ in range(dim)]
+                norm = math.sqrt(sum(component * component for component in vec)) or 1.0
+                embeddings.append([component / norm for component in vec])
             
             return embeddings
         
@@ -169,4 +182,3 @@ class EmbeddingModel:
             chunks = [code]
         
         return chunks
-

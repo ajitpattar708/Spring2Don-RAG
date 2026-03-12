@@ -194,7 +194,7 @@ class MockProvider(LLMProvider):
             if "spring-boot-starter-data-jpa" in prompt:
                 return "io.helidon.integrations.cdi:helidon-cdi-hibernate:4.0.0"
             if "spring-boot-starter-test" in prompt:
-                return "io.helidon.microprofile.tests:helidon-microprofile-tests-junit5:4.0.0"
+                return "io.helidon.microprofile.testing:helidon-microprofile-testing-junit5:4.0.0"
             
             # Generic fallback
             return "io.helidon.microprofile.bundles:helidon-microprofile:4.0.0"
@@ -240,4 +240,3 @@ class LLMProviderFactory:
             return MockProvider(settings)
         
         return provider
-

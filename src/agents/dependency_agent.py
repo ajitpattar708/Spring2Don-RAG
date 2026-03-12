@@ -17,6 +17,8 @@ from src.utils.version_compatibility import VersionCompatibility
 
 logger = setup_logger(__name__)
 
+LOMBOK_VERSION = "1.18.42"
+
 
 class DependencyAgent:
     """Migrates build dependencies from Spring Boot to Helidon MP"""
@@ -92,8 +94,9 @@ class DependencyAgent:
                 root.remove(parent)
                 logger.info("Removed existing parent POM")
                 
-            # Add Helidon parent near the top for visibility
-            self._add_helidon_parent(root, ns)
+            # Helidon MP 4.x should not rely on a synthetic parent POM here.
+            # We keep the project as a normal Maven module and manage Helidon
+            # versions explicitly via the helidon.version property.
 
             # 2. Dependency Migration
             dependencies_modified = 0
@@ -121,8 +124,14 @@ class DependencyAgent:
                 artifact_id = artifact_id_elem.text
                 
                 if self._is_spring_dependency(dep, ns):
+                    if self._should_remove_spring_dependency(artifact_id):
+                        logger.info(f"Removing Spring-only dependency with no Helidon runtime equivalent: {artifact_id}")
+                        continue
+
                     # Migrate Spring dependency
-                    helidon_dep = self._find_helidon_dependency(artifact_id)
+                    scope_elem = dep.find('maven:scope', ns)
+                    dependency_scope = scope_elem.text.strip() if scope_elem is not None and scope_elem.text else None
+                    helidon_dep = self._find_helidon_dependency(artifact_id, dependency_scope)
                     
                     if helidon_dep:
                         # Update dependency info
@@ -138,7 +147,31 @@ class DependencyAgent:
                         elif version_elem is not None:
                              # Remove explicit version if managed by parent
                              dep.remove(version_elem)
-                             
+
+                        # Normalize dependency metadata to avoid carrying Spring-specific test/BOM shape forward.
+                        type_elem = dep.find('maven:type', ns)
+                        if helidon_dep.get('type'):
+                            if type_elem is None:
+                                type_elem = ET.SubElement(dep, '{http://maven.apache.org/POM/4.0.0}type')
+                            type_elem.text = helidon_dep['type']
+                        elif type_elem is not None:
+                            dep.remove(type_elem)
+
+                        if helidon_dep.get('scope'):
+                            if scope_elem is None:
+                                scope_elem = ET.SubElement(dep, '{http://maven.apache.org/POM/4.0.0}scope')
+                            scope_elem.text = helidon_dep['scope']
+                        elif scope_elem is not None and (scope_elem.text or '').strip() != 'test':
+                            dep.remove(scope_elem)
+
+                        exclusions_elem = dep.find('maven:exclusions', ns)
+                        if (
+                            exclusions_elem is not None
+                            and not helidon_dep.get('preserve_exclusions')
+                            and not self._is_inhouse_dependency(group_id)
+                        ):
+                            dep.remove(exclusions_elem)
+                        
                         dependencies_modified += 1
                         logger.info(f"Migrated: {artifact_id} -> {helidon_dep['artifactId']}")
                         
@@ -150,6 +183,12 @@ class DependencyAgent:
                          # Don't add to map, effectively removing it
                 else:
                     # Keep non-Spring dependency
+                    if group_id == 'org.projectlombok' and artifact_id == 'lombok':
+                        version_elem = dep.find('maven:version', ns)
+                        if version_elem is None:
+                            version_elem = ET.SubElement(dep, '{http://maven.apache.org/POM/4.0.0}version')
+                        version_elem.text = LOMBOK_VERSION
+                        logger.info(f"Updated Lombok dependency to {LOMBOK_VERSION}")
                     key = f"{group_id}:{artifact_id}"
                     new_deps_map[key] = dep
 
@@ -218,9 +257,21 @@ class DependencyAgent:
                 if plugins is not None:
                     for plugin in list(plugins.findall('maven:plugin', ns)):
                         artifact_id = plugin.find('maven:artifactId', ns)
-                        if artifact_id is not None and 'spring-boot-maven-plugin' in artifact_id.text:
+                        if artifact_id is not None and (
+                            'spring-boot-maven-plugin' in artifact_id.text
+                            or artifact_id.text == 'jacoco-maven-plugin'
+                            or artifact_id.text == 'dockerfile-maven-plugin'
+                            or artifact_id.text == 'maven-dependency-plugin'
+                        ):
                             plugins.remove(plugin)
-                            logger.info("Removed Spring Boot Maven plugin")
+                            if artifact_id.text == 'jacoco-maven-plugin':
+                                logger.info("Removed JaCoCo Maven plugin")
+                            elif artifact_id.text == 'dockerfile-maven-plugin':
+                                logger.info("Removed Dockerfile Maven plugin")
+                            elif artifact_id.text == 'maven-dependency-plugin':
+                                logger.info("Removed Maven dependency plugin")
+                            else:
+                                logger.info("Removed Spring Boot Maven plugin")
             
             # Remove Spring references from POM metadata
             self._remove_spring_references(root, ns)
@@ -230,6 +281,22 @@ class DependencyAgent:
                 self._update_java_version(root, ns)
             except Exception as e:
                 logger.error(f"Error updating Java version: {str(e)}")
+
+            # Ensure helidon.version property is present for visibility
+            try:
+                self._ensure_helidon_version_property(root, ns)
+            except Exception as e:
+                logger.error(f"Error setting helidon.version property: {str(e)}")
+
+            try:
+                self._ensure_helidon_dependency_versions(root, ns)
+            except Exception as e:
+                logger.error(f"Error setting Helidon dependency versions: {str(e)}")
+
+            try:
+                self._ensure_maven_central_repository(root, ns)
+            except Exception as e:
+                logger.error(f"Error ensuring Maven Central repository: {str(e)}")
             
             # Update Maven compiler plugin with correct Java version
             try:
@@ -272,7 +339,7 @@ class DependencyAgent:
         
         return {'success': True, 'files_modified': [str(build_gradle)]}
     
-    def _find_helidon_dependency(self, spring_artifact_id: str) -> Optional[Dict]:
+    def _find_helidon_dependency(self, spring_artifact_id: str, dependency_scope: Optional[str] = None) -> Optional[Dict]:
         """
         Find Helidon MP equivalent for Spring Boot dependency using RAG
         
@@ -284,6 +351,14 @@ class DependencyAgent:
         """
         try:
             helidon_version = getattr(self.settings, 'helidon_version', '4.0.0')
+
+            deterministic_match = self._deterministic_dependency_mapping(
+                spring_artifact_id,
+                dependency_scope,
+                helidon_version,
+            )
+            if deterministic_match is not None:
+                return deterministic_match
             
             # Generate embedding for the Spring dependency
             query_text = f"Spring Boot dependency: {spring_artifact_id} to Helidon {helidon_version}"
@@ -320,6 +395,14 @@ class DependencyAgent:
                     
                     helidon_pattern = metadata.get('helidon_pattern', '')
                     spring_pattern = metadata.get('spring_pattern', '')
+
+                    candidate = self._parse_dependency_pattern(helidon_pattern, helidon_version)
+                    if not candidate or not self._is_valid_helidon_dependency_candidate(
+                        spring_artifact_id,
+                        candidate,
+                        dependency_scope,
+                    ):
+                        continue
                     
                     # Score the match (higher is better)
                     score = 0
@@ -344,16 +427,13 @@ class DependencyAgent:
                 if best_match and best_score > 0:
                     metadata = best_match.get('metadata', {})
                     helidon_pattern = metadata.get('helidon_pattern', '')
-                    
-                    # Parse groupId:artifactId format
-                    if ':' in helidon_pattern:
-                        parts = helidon_pattern.split(':')
-                        if len(parts) >= 2:
-                            return {
-                                'groupId': parts[0],
-                                'artifactId': parts[1],
-                                'version': helidon_version  # Use user-specified version
-                            }
+                    candidate = self._parse_dependency_pattern(helidon_pattern, helidon_version)
+                    if candidate and self._is_valid_helidon_dependency_candidate(
+                        spring_artifact_id,
+                        candidate,
+                        dependency_scope,
+                    ):
+                        return candidate
                 
                 # Fallback: use first compatible result if no good match
                 for result in results:
@@ -362,21 +442,121 @@ class DependencyAgent:
                         continue
                     if self._is_version_compatible(metadata.get('helidon_version', ''), helidon_version):
                         helidon_pattern = metadata.get('helidon_pattern', '')
-                        if ':' in helidon_pattern:
-                            parts = helidon_pattern.split(':')
-                            if len(parts) >= 2:
-                                return {
-                                    'groupId': parts[0],
-                                    'artifactId': parts[1],
-                                    'version': helidon_version
-                                }
+                        candidate = self._parse_dependency_pattern(helidon_pattern, helidon_version)
+                        if candidate and self._is_valid_helidon_dependency_candidate(
+                            spring_artifact_id,
+                            candidate,
+                            dependency_scope,
+                        ):
+                            return candidate
             
             # Fallback to LLM if RAG doesn't find a match
-            return self._llm_fallback_dependency(spring_artifact_id, helidon_version)
+            llm_candidate = self._llm_fallback_dependency(spring_artifact_id, helidon_version)
+            if self._is_valid_helidon_dependency_candidate(
+                spring_artifact_id,
+                llm_candidate,
+                dependency_scope,
+            ):
+                return llm_candidate
+            return None
             
         except Exception as e:
             logger.error(f"Error finding Helidon dependency: {str(e)}")
             return None
+
+    def _deterministic_dependency_mapping(
+        self,
+        spring_artifact_id: str,
+        dependency_scope: Optional[str],
+        helidon_version: str,
+    ) -> Optional[Dict]:
+        """Return curated production-safe mappings for high-volume Spring dependencies."""
+        artifact = (spring_artifact_id or '').strip().lower()
+        scope = (dependency_scope or '').strip().lower()
+
+        if artifact in {'spring-boot-starter-test', 'spring-boot-test', 'spring-boot-test-autoconfigure'}:
+            return {
+                'groupId': 'io.helidon.microprofile.testing',
+                'artifactId': 'helidon-microprofile-testing-junit5',
+                'version': '${helidon.version}',
+                'scope': 'test',
+            }
+
+        runtime_starters = {
+            'spring-boot-starter',
+            'spring-boot-starter-actuator',
+            'spring-boot-starter-aop',
+            'spring-boot-starter-data-jpa',
+            'spring-boot-starter-jdbc',
+            'spring-boot-starter-validation',
+            'spring-boot-starter-web',
+            'spring-boot-starter-webflux',
+            'spring-cloud-gateway-mvc',
+            'spring-cloud-starter-gateway',
+        }
+        if artifact in runtime_starters:
+            return {
+                'groupId': 'io.helidon.microprofile.bundles',
+                'artifactId': 'helidon-microprofile',
+                'version': '${helidon.version}',
+            }
+
+        if scope == 'test':
+            return {
+                'groupId': 'io.helidon.microprofile.testing',
+                'artifactId': 'helidon-microprofile-testing-junit5',
+                'version': '${helidon.version}',
+                'scope': 'test',
+            }
+
+        return None
+
+    def _should_remove_spring_dependency(self, spring_artifact_id: str) -> bool:
+        """Identify Spring helper/BOM artifacts that should be dropped instead of remapped."""
+        artifact = (spring_artifact_id or '').strip().lower()
+        return artifact in {
+            'spring-boot-properties-migrator',
+            'spring-cloud-gateway-dependencies',
+        }
+
+    def _parse_dependency_pattern(self, helidon_pattern: str, helidon_version: str) -> Optional[Dict]:
+        """Parse a groupId:artifactId[:version] pattern into a dependency dict."""
+        if ':' not in (helidon_pattern or ''):
+            return None
+        parts = helidon_pattern.split(':')
+        if len(parts) < 2:
+            return None
+        return {
+            'groupId': parts[0],
+            'artifactId': parts[1],
+            'version': parts[2] if len(parts) > 2 and parts[2] else helidon_version,
+        }
+
+    def _is_valid_helidon_dependency_candidate(
+        self,
+        spring_artifact_id: str,
+        candidate: Optional[Dict],
+        dependency_scope: Optional[str],
+    ) -> bool:
+        """Reject obviously unsafe dependency mappings for production migration."""
+        if not candidate:
+            return False
+
+        scope = (dependency_scope or '').strip().lower()
+        is_test_dependency = scope == 'test' or 'test' in (spring_artifact_id or '').lower()
+        candidate_artifact = (candidate.get('artifactId') or '').lower()
+        candidate_group = (candidate.get('groupId') or '').lower()
+
+        if not is_test_dependency and 'test' in candidate_artifact:
+            return False
+
+        if not is_test_dependency and candidate.get('type') == 'pom':
+            return False
+
+        if not candidate_group.startswith('io.helidon') and not candidate_group.startswith('jakarta'):
+            return False
+
+        return True
     
     def _llm_fallback_dependency(self, spring_artifact_id: str, helidon_version: str = '4.0.0') -> Optional[Dict]:
         """Use LLM to find dependency mapping when RAG fails"""
@@ -491,47 +671,106 @@ Important: Use Helidon version {helidon_version} in the response."""
         if target is None:
             target = ET.SubElement(configuration, '{http://maven.apache.org/POM/4.0.0}target')
         target.text = jdk_to_use
+
+        if self._has_dependency(root, ns, 'org.projectlombok', 'lombok'):
+            annotation_processor_paths = configuration.find('maven:annotationProcessorPaths', ns)
+            if annotation_processor_paths is None:
+                annotation_processor_paths = ET.SubElement(configuration, '{http://maven.apache.org/POM/4.0.0}annotationProcessorPaths')
+
+            lombok_path = None
+            for path in annotation_processor_paths.findall('maven:path', ns):
+                group_id = path.find('maven:groupId', ns)
+                artifact_id = path.find('maven:artifactId', ns)
+                if group_id is not None and artifact_id is not None and group_id.text == 'org.projectlombok' and artifact_id.text == 'lombok':
+                    lombok_path = path
+                    break
+
+            if lombok_path is None:
+                lombok_path = ET.SubElement(annotation_processor_paths, '{http://maven.apache.org/POM/4.0.0}path')
+                group_id = ET.SubElement(lombok_path, '{http://maven.apache.org/POM/4.0.0}groupId')
+                group_id.text = 'org.projectlombok'
+                artifact_id = ET.SubElement(lombok_path, '{http://maven.apache.org/POM/4.0.0}artifactId')
+                artifact_id.text = 'lombok'
+                version = ET.SubElement(lombok_path, '{http://maven.apache.org/POM/4.0.0}version')
+                version.text = LOMBOK_VERSION
+            else:
+                version = lombok_path.find('maven:version', ns)
+                if version is None:
+                    version = ET.SubElement(lombok_path, '{http://maven.apache.org/POM/4.0.0}version')
+                version.text = LOMBOK_VERSION
+            logger.info(f"Configured Lombok annotation processor path {LOMBOK_VERSION}")
         
         logger.info(f"Updated Maven compiler plugin to use Java {jdk_to_use}")
-    
-    def _add_helidon_parent(self, root, ns):
-        """Add Helidon parent POM if not present"""
-        helidon_version = getattr(self.settings, 'helidon_version', '4.0.0')
-        
-        # Check if parent already exists
-        parent = root.find('maven:parent', ns)
-        if parent is not None:
-            artifact_id = parent.find('maven:artifactId', ns)
-            if artifact_id is not None and 'helidon' in artifact_id.text.lower():
-                logger.info("Helidon parent POM already present")
-                return
-        
-        # Add Helidon parent near the top (after modelVersion if possible)
-        parent = ET.Element('{http://maven.apache.org/POM/4.0.0}parent')
-        
-        group_id = ET.SubElement(parent, '{http://maven.apache.org/POM/4.0.0}groupId')
-        group_id.text = 'io.helidon.microprofile.bundles'
-        
-        artifact_id = ET.SubElement(parent, '{http://maven.apache.org/POM/4.0.0}artifactId')
-        artifact_id.text = 'helidon-microprofile-parent'
-        
-        version = ET.SubElement(parent, '{http://maven.apache.org/POM/4.0.0}version')
-        version.text = helidon_version
-        
-        relative_path = ET.SubElement(parent, '{http://maven.apache.org/POM/4.0.0}relativePath')
-        relative_path.text = ''
 
-        # Insert parent after modelVersion if present, otherwise at top
-        inserted = False
-        for idx, child in enumerate(list(root)):
-            if child.tag.endswith('modelVersion'):
-                root.insert(idx + 1, parent)
-                inserted = True
-                break
-        if not inserted:
-            root.insert(0, parent)
-        
-        logger.info(f"Added Helidon parent POM version {helidon_version}")
+    def _has_dependency(self, root, ns, group_id_text: str, artifact_id_text: str) -> bool:
+        deps_container = root.find('maven:dependencies', ns)
+        if deps_container is None:
+            return False
+        for dep in deps_container.findall('maven:dependency', ns):
+            group_id = dep.find('maven:groupId', ns)
+            artifact_id = dep.find('maven:artifactId', ns)
+            if group_id is not None and artifact_id is not None:
+                if (group_id.text or '').strip() == group_id_text and (artifact_id.text or '').strip() == artifact_id_text:
+                    return True
+        return False
+
+    def _ensure_helidon_version_property(self, root, ns):
+        """Ensure helidon.version property is set for visibility"""
+        helidon_version = getattr(self.settings, 'helidon_version', '4.0.0')
+        properties = root.find('maven:properties', ns)
+        if properties is None:
+            properties = ET.SubElement(root, '{http://maven.apache.org/POM/4.0.0}properties')
+
+        helidon_prop = properties.find('maven:helidon.version', ns)
+        if helidon_prop is None:
+            helidon_prop = ET.SubElement(properties, '{http://maven.apache.org/POM/4.0.0}helidon.version')
+        helidon_prop.text = helidon_version
+
+    def _ensure_helidon_dependency_versions(self, root, ns):
+        """Ensure all Helidon dependencies resolve without relying on a synthetic parent."""
+        deps_container = root.find('maven:dependencies', ns)
+        if deps_container is None:
+            return
+
+        for dep in deps_container.findall('maven:dependency', ns):
+            group_id_elem = dep.find('maven:groupId', ns)
+            artifact_id_elem = dep.find('maven:artifactId', ns)
+            if group_id_elem is None or artifact_id_elem is None:
+                continue
+
+            group_id = (group_id_elem.text or '').strip()
+            if not group_id.startswith('io.helidon.'):
+                continue
+
+            version_elem = dep.find('maven:version', ns)
+            if version_elem is None:
+                version_elem = ET.SubElement(dep, '{http://maven.apache.org/POM/4.0.0}version')
+            if not (version_elem.text or '').strip():
+                version_elem.text = '${helidon.version}'
+            elif (version_elem.text or '').strip() == getattr(self.settings, 'helidon_version', '4.0.0'):
+                version_elem.text = '${helidon.version}'
+
+        logger.info("Ensured explicit Helidon dependency versions via ${helidon.version}")
+
+    def _ensure_maven_central_repository(self, root, ns):
+        """Ensure the generated POM can resolve public Helidon artifacts."""
+        repositories = root.find('maven:repositories', ns)
+        if repositories is None:
+            repositories = ET.SubElement(root, '{http://maven.apache.org/POM/4.0.0}repositories')
+
+        for repo in repositories.findall('maven:repository', ns):
+            url = repo.find('maven:url', ns)
+            if url is not None and 'repo.maven.apache.org/maven2' in (url.text or ''):
+                return
+
+        repository = ET.SubElement(repositories, '{http://maven.apache.org/POM/4.0.0}repository')
+        repo_id = ET.SubElement(repository, '{http://maven.apache.org/POM/4.0.0}id')
+        repo_id.text = 'maven-central'
+        name = ET.SubElement(repository, '{http://maven.apache.org/POM/4.0.0}name')
+        name.text = 'Maven Central'
+        url = ET.SubElement(repository, '{http://maven.apache.org/POM/4.0.0}url')
+        url.text = 'https://repo.maven.apache.org/maven2'
+        logger.info("Added Maven Central repository for Helidon artifact resolution")
     
     def _remove_spring_references(self, root, ns):
         """Remove all Spring references from POM metadata"""
@@ -581,50 +820,46 @@ Important: Use Helidon version {helidon_version} in the response."""
         group_id = group_id_elem.text or ''
         artifact_id = artifact_id_elem.text or ''
         
-        return 'spring-boot' in artifact_id or 'springframework' in group_id
+        return (
+            artifact_id.startswith('spring-')
+            or 'spring-boot' in artifact_id
+            or group_id.startswith('org.springframework')
+            or 'springframework' in group_id
+        )
+
+    def _is_inhouse_dependency(self, group_id: Optional[str]) -> bool:
+        """Identify organization-owned dependencies whose exclusions should be preserved."""
+        normalized = (group_id or '').strip()
+        return normalized.startswith('com.oracle.')
     
     def _write_clean_xml(self, tree: ET.ElementTree, output_path: Path):
-        """Write XML without namespace prefixes (clean format)"""
-        import xml.dom.minidom
-        
-        # Get root element
-        root = tree.getroot()
-        
-        # Remove namespace prefixes from all elements
-        for elem in root.iter():
-            # Remove namespace prefix from tag
-            if '}' in elem.tag:
-                elem.tag = elem.tag.split('}')[1]
-        
-        # Write to string first
-        xml_str = ET.tostring(root, encoding='unicode')
-        
-        # Parse with minidom for pretty printing
-        dom = xml.dom.minidom.parseString(xml_str)
-        
-        # Write with proper formatting
-        with open(output_path, 'w', encoding='utf-8') as f:
-            # Add XML declaration and default namespace
-            f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-            f.write('<project xmlns="http://maven.apache.org/POM/4.0.0"\n')
-            f.write('         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"\n')
-            f.write('         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 ')
-            f.write('http://maven.apache.org/xsd/maven-4.0.0.xsd">\n')
-            
-            # Get children of root element
-            for child in root:
-                # Convert child to string and format
-                child_str = ET.tostring(child, encoding='unicode')
-                child_dom = xml.dom.minidom.parseString(f'<root>{child_str}</root>')
-                child_xml = child_dom.documentElement.firstChild.toxml() if child_dom.documentElement.firstChild else ''
-                
-                # Add proper indentation (4 spaces)
-                lines = child_xml.split('\n')
-                for line in lines:
-                    if line.strip():
-                        f.write('    ' + line + '\n')
-            
-            f.write('</project>\n')
+        """Write XML with stable Maven namespaces and readable indentation."""
+        ET.register_namespace('', 'http://maven.apache.org/POM/4.0.0')
+        ET.register_namespace('xsi', 'http://www.w3.org/2001/XMLSchema-instance')
+
+        try:
+            ET.indent(tree, space='    ')
+        except AttributeError:
+            self._indent_xml(tree.getroot())
+
+        tree.write(output_path, encoding='UTF-8', xml_declaration=True)
+
+    def _indent_xml(self, elem, level: int = 0):
+        """Compatibility pretty-printer for Python versions without ET.indent."""
+        indent = "\n" + ("    " * level)
+        child_indent = "\n" + ("    " * (level + 1))
+
+        if len(elem):
+            if not elem.text or not elem.text.strip():
+                elem.text = child_indent
+            for child in elem:
+                self._indent_xml(child, level + 1)
+                if not child.tail or not child.tail.strip():
+                    child.tail = child_indent
+            if not elem[-1].tail or not elem[-1].tail.strip():
+                elem[-1].tail = indent
+        elif level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = indent
     
     def _is_version_compatible(self, pattern_version: str, target_version: str) -> bool:
         """
@@ -686,4 +921,3 @@ Important: Use Helidon version {helidon_version} in the response."""
             return (version >= min_version and version <= max_version)
         except:
             return False
-

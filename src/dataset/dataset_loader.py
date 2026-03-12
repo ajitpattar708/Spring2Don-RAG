@@ -5,7 +5,7 @@ Loads migration patterns into ChromaDB knowledge base
 
 import json
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Iterable
 from src.rag.knowledge_base import KnowledgeBase
 from src.rag.embeddings import EmbeddingModel
 from src.config.settings import Settings
@@ -123,14 +123,22 @@ class DatasetLoader:
             logger.error(f"Failed to load patterns into '{collection_name}': {str(e)}")
             raise
     
-    def initialize_knowledge_base(self, dataset_file: Path):
-        """Initialize knowledge base with dataset"""
+    def initialize_knowledge_base(self, dataset_file: Path, extra_dataset_files: Iterable[Path] | None = None):
+        """Initialize knowledge base with a primary dataset plus optional supplemental datasets."""
         if not dataset_file.exists():
             logger.warning(f"Dataset file not found: {dataset_file}")
             logger.info("Creating sample dataset...")
             self._create_sample_dataset(dataset_file)
-        
-        self.load_from_json(dataset_file)
+
+        dataset_files = [dataset_file]
+        for extra_file in extra_dataset_files or []:
+            if extra_file.exists():
+                dataset_files.append(extra_file)
+            else:
+                logger.warning(f"Supplemental dataset file not found, skipping: {extra_file}")
+
+        for current_file in dataset_files:
+            self.load_from_json(current_file)
         
         # Print statistics
         for collection_name in self.knowledge_base.collections.keys():
@@ -144,5 +152,4 @@ class DatasetLoader:
         generator = DatasetGenerator()
         generator.save_to_json(dataset_file)
         logger.info(f"Created sample dataset at {dataset_file}")
-
 
