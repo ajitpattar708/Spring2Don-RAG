@@ -10,8 +10,9 @@ import shutil
 import sys
 import time
 import os
+import json
 from src.config.settings import Settings
-from src.utils.logger import setup_logger
+from src.utils.logger import color_text, setup_logger
 from src.utils.version_compatibility import VersionCompatibility
 from src.agents.dependency_agent import DependencyAgent
 from src.agents.code_transform_agent import CodeTransformAgent
@@ -51,6 +52,7 @@ class MigrationOrchestrator:
         self.spring_version = spring_version
         self.helidon_version = helidon_version
         self.settings = settings
+        self.settings.validate()
         
         # Set versions in settings for agents to use
         settings.spring_version = spring_version
@@ -81,15 +83,15 @@ class MigrationOrchestrator:
         """Execute the migration process"""
         start_time = time.time()
         try:
-            print("\n" + "="*70)
-            print("SPRING BOOT TO HELIDON MP MIGRATION")
-            print("="*70)
+            print("\n" + color_text("="*70, "title"))
+            print(color_text("SPRING BOOT TO HELIDON MP MIGRATION", "title"))
+            print(color_text("="*70, "title"))
             logger.info("Starting migration orchestration...")
             
             # Validate source path
             if not self.source_path.exists():
                 error_msg = f"ERROR: Source path does not exist: {self.source_path}"
-                print(error_msg)
+                print(color_text(error_msg, "error"))
                 return MigrationResult(
                     success=False,
                     error_message=error_msg
@@ -97,18 +99,28 @@ class MigrationOrchestrator:
             
             # Validate knowledge base is initialized
             try:
-                stats = self.dependency_agent.knowledge_base.get_collection_stats('annotations')
-                if stats['count'] == 0:
-                    warning_msg = "WARNING: Knowledge base appears empty. Run 'python migration_agent_main.py init' first."
-                    print(warning_msg)
+                knowledge_base = self.dependency_agent.knowledge_base
+                kb_available = getattr(knowledge_base, 'available', True)
+                stats = knowledge_base.get_collection_stats('annotations')
+                if kb_available and stats['count'] == 0:
+                    warning_msg = "Knowledge base appears empty. Run 'python migration_agent_main.py init' first."
+                    if self.settings.require_kb and not self.settings.offline_mode:
+                        raise RuntimeError(warning_msg)
+                    print(f"WARNING: {warning_msg}")
+                    logger.warning(warning_msg)
+                elif not kb_available:
+                    warning_msg = "Knowledge base is unavailable; continuing with deterministic migration mode."
+                    print(color_text(f"WARNING: {warning_msg}", "warn"))
                     logger.warning(warning_msg)
             except Exception as e:
-                warning_msg = f"WARNING: Could not verify knowledge base: {str(e)}"
-                print(warning_msg)
+                warning_msg = f"Could not verify knowledge base: {str(e)}"
+                if self.settings.require_kb and not self.settings.offline_mode:
+                    raise RuntimeError(warning_msg)
+                print(color_text(f"WARNING: {warning_msg}", "warn"))
                 logger.warning(warning_msg)
             
             # ALWAYS clean target directory before migration (even if it doesn't exist, ensure it's clean)
-            print("\n[Phase 0] Cleaning target directory...")
+            print("\n" + color_text("[Phase 0] Cleaning target directory...", "phase"))
             sys.stdout.flush()
             clean_start = time.time()
             if self.target_path.exists():
@@ -120,44 +132,44 @@ class MigrationOrchestrator:
             # Verify directory is gone/clean
             if self.target_path.exists():
                 logger.warning(f"WARNING: Target directory still exists after cleanup: {self.target_path}")
-                print(f"   [WARNING] Directory still exists, attempting final cleanup...")
+                print(color_text("   [WARNING] Directory still exists, attempting final cleanup...", "warn"))
                 sys.stdout.flush()
                 self._clean_target_directory()
             
-            print(f"   [OK] Cleaned in {clean_time:.2f}s")
+            print(color_text(f"   [OK] Cleaned in {clean_time:.2f}s", "ok"))
             
             # Copy project structure to target (copytree will create the directory)
-            print("\n[Phase 0] Copying project structure...")
+            print("\n" + color_text("[Phase 0] Copying project structure...", "phase"))
             sys.stdout.flush()
             copy_start = time.time()
             self._copy_project_structure()
             copy_time = time.time() - copy_start
-            print(f"   [OK] Completed in {copy_time:.2f}s")
+            print(color_text(f"   [OK] Completed in {copy_time:.2f}s", "ok"))
             
             # Phase 1: Analyze project structure
-            print("\n[Phase 1] Analyzing project structure...")
+            print("\n" + color_text("[Phase 1] Analyzing project structure...", "phase"))
             sys.stdout.flush()
             analyze_start = time.time()
             project_structure = self._analyze_project_structure(self.target_path)
             analyze_time = time.time() - analyze_start
-            print(f"   [OK] Completed in {analyze_time:.2f}s")
+            print(color_text(f"   [OK] Completed in {analyze_time:.2f}s", "ok"))
             
             # Phase 2: Migrate dependencies
-            print("\n[Phase 2] Migrating dependencies...")
+            print("\n" + color_text("[Phase 2] Migrating dependencies...", "phase"))
             sys.stdout.flush()
             dep_start = time.time()
             dependency_result = self.dependency_agent.migrate(project_structure)
             dep_time = time.time() - dep_start
             if not dependency_result.get('success'):
                 error_msg = f"   WARNING: Dependency migration had issues: {dependency_result.get('error')}"
-                print(error_msg)
+                print(color_text(error_msg, "warn"))
                 logger.warning(error_msg)
             else:
                 deps_migrated = dependency_result.get('dependencies_migrated', 0)
-                print(f"   [OK] Migrated {deps_migrated} dependencies in {dep_time:.2f}s")
+                print(color_text(f"   [OK] Migrated {deps_migrated} dependencies in {dep_time:.2f}s", "ok"))
             
             # Phase 3: Migrate configuration files
-            print("\n[Phase 3] Migrating configuration files...")
+            print("\n" + color_text("[Phase 3] Migrating configuration files...", "phase"))
             sys.stdout.flush()
             config_start = time.time()
             config_result = self.config_agent.migrate(
@@ -168,14 +180,14 @@ class MigrationOrchestrator:
             config_time = time.time() - config_start
             if not config_result.get('success'):
                 error_msg = f"   WARNING: Config migration had issues: {config_result.get('error')}"
-                print(error_msg)
+                print(color_text(error_msg, "warn"))
                 logger.warning(error_msg)
             else:
                 configs_migrated = config_result.get('files_migrated', 0)
-                print(f"   [OK] Migrated {configs_migrated} config files in {config_time:.2f}s")
+                print(color_text(f"   [OK] Migrated {configs_migrated} config files in {config_time:.2f}s", "ok"))
             
             # Phase 4: Migrate source code
-            print("\n[Phase 4] Migrating source code...")
+            print("\n" + color_text("[Phase 4] Migrating source code...", "phase"))
             sys.stdout.flush()
             code_start = time.time()
             code_result = self.code_transform_agent.migrate(
@@ -186,39 +198,72 @@ class MigrationOrchestrator:
             code_time = time.time() - code_start
             if not code_result.get('success'):
                 error_msg = f"   WARNING: Code migration had issues: {code_result.get('error')}"
-                print(error_msg)
+                print(color_text(error_msg, "warn"))
                 logger.warning(error_msg)
             else:
                 files_migrated = code_result.get('files_migrated', 0)
                 transformations = code_result.get('transformations_applied', 0)
-                print(f"   [OK] Migrated {files_migrated} Java files with {transformations} transformations in {code_time:.2f}s")
+                print(color_text(f"   [OK] Migrated {files_migrated} Java files with {transformations} transformations in {code_time:.2f}s", "ok"))
             
             # Phase 5: Validate migration
-            print("\n[Phase 5] Validating migration...")
+            print("\n" + color_text("[Phase 5] Validating migration...", "phase"))
             sys.stdout.flush()
             validation_start = time.time()
             validation_result = self.validation_agent.validate(self.target_path)
             validation_time = time.time() - validation_start
             if not validation_result.get('success'):
-                warning_msg = "   WARNING: Validation found issues, but migration completed"
-                print(warning_msg)
+                warning_msg = "   WARNING: Validation found issues; migration will be marked failed"
+                print(color_text(warning_msg, "warn"))
                 logger.warning(warning_msg)
             else:
-                print(f"   [OK] Validation completed in {validation_time:.2f}s")
+                print(color_text(f"   [OK] Validation completed in {validation_time:.2f}s", "ok"))
             
             files_migrated = code_result.get('files_migrated', 0)
             transformations_applied = code_result.get('transformations_applied', 0)
             total_time = time.time() - start_time
+
+            # Generate migration report
+            report = self._build_migration_report(
+                files_migrated=files_migrated,
+                transformations_applied=transformations_applied,
+                total_time=total_time,
+                dependency_result=dependency_result,
+                config_result=config_result,
+                code_result=code_result,
+                validation_result=validation_result
+            )
+            self._write_migration_report(report)
+
+            if not validation_result.get('success'):
+                error_message = self._build_validation_error_message(validation_result)
+                print("\n" + color_text("="*70, "error"))
+                print(color_text("MIGRATION FAILED VALIDATION", "error"))
+                print(color_text("="*70, "error"))
+                print(color_text("Summary:", "info"))
+                print(color_text(f"   • Files migrated: {files_migrated}", "info"))
+                print(color_text(f"   • Transformations applied: {transformations_applied}", "info"))
+                print(color_text(f"   • Total time: {total_time:.2f}s ({total_time/60:.1f} minutes)", "info"))
+                print(color_text(f"   • Output directory: {self.target_path}", "info"))
+                print(color_text(f"   • Validation error: {error_message}", "error"))
+                print(color_text("="*70 + "\n", "error"))
+                logger.error(error_message)
+                return MigrationResult(
+                    success=False,
+                    files_migrated=files_migrated,
+                    transformations_applied=transformations_applied,
+                    error_message=error_message,
+                    warnings=[error_message]
+                )
             
-            print("\n" + "="*70)
-            print("MIGRATION COMPLETED SUCCESSFULLY!")
-            print("="*70)
-            print(f"Summary:")
-            print(f"   • Files migrated: {files_migrated}")
-            print(f"   • Transformations applied: {transformations_applied}")
-            print(f"   • Total time: {total_time:.2f}s ({total_time/60:.1f} minutes)")
-            print(f"   • Output directory: {self.target_path}")
-            print("="*70 + "\n")
+            print("\n" + color_text("="*70, "ok"))
+            print(color_text("MIGRATION COMPLETED SUCCESSFULLY!", "ok"))
+            print(color_text("="*70, "ok"))
+            print(color_text("Summary:", "info"))
+            print(color_text(f"   • Files migrated: {files_migrated}", "info"))
+            print(color_text(f"   • Transformations applied: {transformations_applied}", "info"))
+            print(color_text(f"   • Total time: {total_time:.2f}s ({total_time/60:.1f} minutes)", "info"))
+            print(color_text(f"   • Output directory: {self.target_path}", "info"))
+            print(color_text("="*70 + "\n", "ok"))
             
             logger.info("Migration completed successfully!")
             return MigrationResult(
@@ -230,13 +275,150 @@ class MigrationOrchestrator:
         except Exception as e:
             total_time = time.time() - start_time
             error_msg = f"MIGRATION FAILED after {total_time:.2f}s: {str(e)}"
-            print(f"\n{error_msg}")
-            print(f"   Error type: {type(e).__name__}")
+            print("\n" + color_text(error_msg, "error"))
+            print(color_text(f"   Error type: {type(e).__name__}", "error"))
             logger.error(f"Migration failed: {str(e)}", exc_info=True)
             return MigrationResult(
                 success=False,
                 error_message=str(e)
             )
+
+    def _build_validation_error_message(self, validation_result: dict) -> str:
+        """Summarize validation failure for the migration result."""
+        results = validation_result.get('results') or {}
+        compilation_result = results.get('compilation') or {}
+        if not compilation_result.get('success'):
+            compilation_message = compilation_result.get('message')
+            if compilation_message:
+                return compilation_message
+
+        manual_review = validation_result.get('manual_review') or {}
+        issues = manual_review.get('blocking_issues') or []
+        issue_count = len(issues)
+
+        if issue_count and issues:
+            return f"Validation failed with {issue_count} issue(s). First issue: {issues[0]}"
+
+        failed_checks = [
+            name for name, result in results.items()
+            if not result.get('success')
+        ]
+        if failed_checks:
+            return f"Validation failed in checks: {', '.join(failed_checks)}"
+
+        return "Validation failed with unknown issues."
+
+    def _build_migration_report(
+        self,
+        files_migrated: int,
+        transformations_applied: int,
+        total_time: float,
+        dependency_result: dict,
+        config_result: dict,
+        code_result: dict,
+        validation_result: dict
+    ) -> dict:
+        """Build a GA-ready migration report"""
+        ga_readiness = self._build_ga_readiness(validation_result)
+        return {
+            'summary': {
+                'source_path': str(self.source_path),
+                'target_path': str(self.target_path),
+                'spring_version': self.spring_version,
+                'helidon_version': self.helidon_version,
+                'files_migrated': files_migrated,
+                'transformations_applied': transformations_applied,
+                'total_time_seconds': round(total_time, 2)
+            },
+            'dependency_migration': dependency_result,
+            'config_migration': config_result,
+            'code_migration': {
+                'files_migrated': code_result.get('files_migrated'),
+                'transformations_applied': code_result.get('transformations_applied'),
+                'fallback_stats': code_result.get('fallback_stats', {})
+            },
+            'validation': validation_result,
+            'ga_readiness': ga_readiness,
+        }
+
+    def _build_ga_readiness(self, validation_result: dict) -> dict:
+        """Summarize whether the migrated service is actually ready for GA rollout."""
+        results = validation_result.get('results') or {}
+        manual_review = validation_result.get('manual_review') or {}
+        manual_issues = manual_review.get('issues') or []
+        blocking_manual_issues = manual_review.get('blocking_issues')
+        if blocking_manual_issues is None:
+            blocking_manual_issues = manual_issues
+        advisory_manual_issues = manual_review.get('advisories') or []
+        compilation = results.get('compilation') or {}
+
+        compile_blocked = bool(compilation.get('blocked'))
+        compile_success = bool(compilation.get('success'))
+        compile_status = 'verified' if compile_success else 'blocked' if compile_blocked else 'failed'
+        preserved_enterprise_patterns = [
+            'AuthzCheck/AuthzCheckAspect preserved as-is',
+            'OCI SDK usage preserved as-is',
+            'OCI Vault access preserved as-is',
+            'In-house request/response filters preserved as-is',
+        ]
+
+        enterprise_blockers = [
+            issue for issue in blocking_manual_issues
+            if any(marker in issue for marker in [
+                'Custom aspect bean requires CDI/Jakarta compatibility review',
+                'Commented-out security annotation requires manual review',
+                'Generic throws Exception requires domain-specific exception mapping review',
+                'Generic throw new Exception(...) requires domain-specific exception mapping review',
+                'Leftover Spring import',
+                'Leftover Spring annotation',
+                'Leftover Spring-specific API',
+            ])
+        ]
+
+        if validation_result.get('success') and not enterprise_blockers and compile_success:
+            status = 'ready'
+            ready_for_ga = True
+        elif compile_blocked and not enterprise_blockers:
+            status = 'verification_blocked'
+            ready_for_ga = False
+        else:
+            status = 'blocked'
+            ready_for_ga = False
+
+        next_actions = []
+        if compile_blocked:
+            next_actions.append('Run Maven compile in an environment with writable Maven cache and repository access.')
+        if enterprise_blockers:
+            next_actions.append('Resolve enterprise migration blockers such as custom security/aspect integration and generic exception contracts.')
+        if advisory_manual_issues or not enterprise_blockers:
+            next_actions.append('Manually review preserved enterprise integrations before GA sign-off.')
+        if not validation_result.get('success') and not enterprise_blockers and not compile_blocked:
+            next_actions.append('Review validation failures and rerun migration verification.')
+
+        return {
+            'ready_for_ga': ready_for_ga,
+            'status': status,
+            'compile_status': compile_status,
+            'enterprise_blockers_count': len(enterprise_blockers),
+            'enterprise_blockers': enterprise_blockers,
+            'preserved_enterprise_patterns': preserved_enterprise_patterns,
+            'manual_review_issues_count': manual_review.get('issues_count', len(manual_issues)),
+            'manual_review_advisories': advisory_manual_issues,
+            'next_actions': next_actions,
+        }
+
+    def _write_migration_report(self, report: dict) -> None:
+        """Write migration report to configured path"""
+        try:
+            report_path = Path(self.settings.migration_report_path)
+            if not report_path.is_absolute():
+                report_path = self.target_path / report_path
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2)
+            logger.info(f"Migration report written to {report_path}")
+        except Exception as e:
+            logger.warning(f"Failed to write migration report: {str(e)}")
     
     def _clean_target_directory(self):
         """Clean the target directory before migration"""
@@ -344,7 +526,7 @@ class MigrationOrchestrator:
             'build_gradle': None
         }
         
-        # Detect build tool
+        # Detect build tool (direct root or nested modules)
         pom_file = base_path / 'pom.xml'
         build_gradle = base_path / 'build.gradle'
         
@@ -354,21 +536,30 @@ class MigrationOrchestrator:
         elif build_gradle.exists():
             structure['build_tool'] = 'gradle'
             structure['build_gradle'] = build_gradle
+        else:
+            # Try to find nested module roots (any subfolder with pom.xml/build.gradle)
+            nested_poms = list(base_path.rglob('pom.xml'))
+            nested_gradles = list(base_path.rglob('build.gradle'))
+            if nested_poms:
+                structure['build_tool'] = 'maven'
+                structure['pom_file'] = nested_poms[0]
+            elif nested_gradles:
+                structure['build_tool'] = 'gradle'
+                structure['build_gradle'] = nested_gradles[0]
         
-        # Find Java source files
+        # Find Java source files (direct root or nested modules)
         java_src_dir = base_path / 'src' / 'main' / 'java'
         if java_src_dir.exists():
             structure['java_files'] = list(java_src_dir.rglob('*.java'))
+        else:
+            structure['java_files'] = list(base_path.rglob('src/main/java/**/*.java'))
         
-        # Find configuration files
-        config_dir = base_path / 'src' / 'main' / 'resources'
-        if config_dir.exists():
-            for config_file in config_dir.rglob('application.*'):
-                structure['config_files'].append(config_file)
+        # Find configuration files (search recursively to handle nested projects)
+        for config_file in base_path.rglob('application.*'):
+            structure['config_files'].append(config_file)
         
         logger.info(f"Detected build tool: {structure['build_tool']}")
         logger.info(f"Found {len(structure['java_files'])} Java files")
         logger.info(f"Found {len(structure['config_files'])} configuration files")
         
         return structure
-

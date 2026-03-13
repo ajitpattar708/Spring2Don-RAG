@@ -94,6 +94,84 @@ The agent uses a Multi-Agent Orchestrator pattern:
 
 ## 🛠️ Advanced Setup & Customization
 
+### ✅ Pattern Learning & Promotion (GA-safe)
+The agent can **learn new patterns during migration** (LLM-generated fixes), then you can **promote them into the production KB**.
+
+**How it works:**
+1. Run a migration (`migrate` or `test`).
+2. If LLM generates a novel transformation, it is saved into `migration_dataset_learned.json`.
+3. Review/curate those learned patterns.
+4. Promote them into the production dataset generator and rebuild the KB.
+
+**Workflow:**
+```bash
+# Run migration (learns new patterns into migration_dataset_learned.json)
+python migration_agent_main.py test
+
+# Review and curate learned patterns
+cat migration_dataset_learned.json
+
+# Promote into dataset generator (production_dataset_generator.py)
+# Rebuild KB
+python migration_agent_main.py init
+```
+
+**GA rule:** Only patterns added to the generator + rebuilt KB are production‑safe.
+
+### GA Guardrails & Reporting
+The agent now includes GA-grade safety checks and reporting:
+- **Knowledge base enforcement**: fails fast if the vector DB is missing/empty (override with `OFFLINE_MODE=true` or `REQUIRE_KB=false`).
+- **LLM consent**: remote providers require explicit opt-in (`LLM_CONSENT=yes`) when `REQUIRE_LLM_CONSENT=true`.
+- **Migration report**: writes a JSON report (`migration_report.json` by default) including fallback telemetry and manual review items.
+
+**Environment variables:**
+```ini
+# GA guardrails
+REQUIRE_KB=true
+OFFLINE_MODE=false
+REQUIRE_LLM_CONSENT=true
+LLM_CONSENT=yes
+LLM_VALIDATION_STRICT=true
+MIGRATION_REPORT_PATH=migration_report.json
+```
+
+#### Migration Report Schema (Example)
+```json
+{
+  "summary": {
+    "source_path": "/path/to/source",
+    "target_path": "/path/to/target",
+    "spring_version": "3.4.5",
+    "helidon_version": "4.3.2",
+    "files_migrated": 12,
+    "transformations_applied": 87,
+    "total_time_seconds": 18.42
+  },
+  "dependency_migration": {"success": true},
+  "config_migration": {"success": true},
+  "code_migration": {
+    "files_migrated": 12,
+    "transformations_applied": 87,
+    "fallback_stats": {
+      "embedding_failures": 0,
+      "rag_failures": 1,
+      "llm_failures": 0,
+      "llm_validation_failures": 0,
+      "regex_fallbacks": 1
+    }
+  },
+  "validation": {
+    "success": false,
+    "manual_review": {
+      "issues_count": 2,
+      "issues": [
+        "Foo.java:12 - Leftover Spring import: import org.springframework..."
+      ]
+    }
+  }
+}
+```
+
 ### Local LLM Setup (Ollama)
 To run the agent completely offline (privacy-focused) without OpenAI:
 1.  **Install Ollama**: [Download from ollama.com](https://ollama.com/)

@@ -49,6 +49,26 @@ This AI-powered agent automates the migration of legacy Spring Boot applications
     # OPENAI_API_KEY=sk-... (if using OpenAI)
     ```
 
+### GA Guardrails & Reporting
+To support GA-level safety and auditability, these options are available:
+
+```ini
+# GA guardrails
+REQUIRE_KB=true
+OFFLINE_MODE=false
+REQUIRE_LLM_CONSENT=true
+LLM_CONSENT=yes
+LLM_VALIDATION_STRICT=true
+MIGRATION_REPORT_PATH=migration_report.json
+```
+
+**What they do:**
+- `REQUIRE_KB`: fail fast if the vector DB is missing/empty.
+- `OFFLINE_MODE`: allow running without KB or remote LLMs.
+- `REQUIRE_LLM_CONSENT` + `LLM_CONSENT`: explicit opt-in for OpenAI/Claude/Groq.
+- `LLM_VALIDATION_STRICT`: stricter LLM output validation.
+- `MIGRATION_REPORT_PATH`: JSON report with fallback telemetry and manual review items.
+
 ### Local LLM Configuration (Optional)
 If you prefer to run the agent locally without sending code to external APIs, follow these steps to set up Ollama:
 
@@ -65,6 +85,29 @@ If you prefer to run the agent locally without sending code to external APIs, fo
     OLLAMA_MODEL=codellama:7b
     OLLAMA_BASE_URL=http://localhost:11434
     ```
+
+## ✅ Pattern Learning & KB Promotion (GA-safe)
+The agent can **learn new patterns during migration** and store them in `migration_dataset_learned.json`.
+
+**How it works:**
+1. Run a migration (`migrate` or `test`).
+2. If LLM generates a new pattern, it is saved to `migration_dataset_learned.json`.
+3. Review & curate those learned patterns.
+4. Promote curated patterns into `production_dataset_generator.py` and rebuild the KB.
+
+**Workflow:**
+```bash
+# Run migration (learns new patterns)
+python migration_agent_main.py test
+
+# Review learned patterns
+cat migration_dataset_learned.json
+
+# Promote to generator + rebuild KB
+python migration_agent_main.py init
+```
+
+**GA rule:** only patterns in the generator + rebuilt KB are production‑safe.
 
 ## 🧠 Knowledge Base Setup
 
@@ -139,6 +182,47 @@ python migration_agent_main.py migrate \
   /path/to/target/helidon-project \
   --spring-version 3.4.5 \
   --helidon-version 4.3.2
+```
+
+### Migration Report
+After a migration, the agent writes a JSON report to `migration_report.json` (or `MIGRATION_REPORT_PATH`).
+It includes summary stats, fallback telemetry, and manual-review issues (leftover Spring imports/annotations).
+
+**Schema example:**
+```json
+{
+  "summary": {
+    "source_path": "/path/to/source",
+    "target_path": "/path/to/target",
+    "spring_version": "3.4.5",
+    "helidon_version": "4.3.2",
+    "files_migrated": 12,
+    "transformations_applied": 87,
+    "total_time_seconds": 18.42
+  },
+  "dependency_migration": {"success": true},
+  "config_migration": {"success": true},
+  "code_migration": {
+    "files_migrated": 12,
+    "transformations_applied": 87,
+    "fallback_stats": {
+      "embedding_failures": 0,
+      "rag_failures": 1,
+      "llm_failures": 0,
+      "llm_validation_failures": 0,
+      "regex_fallbacks": 1
+    }
+  },
+  "validation": {
+    "success": false,
+    "manual_review": {
+      "issues_count": 2,
+      "issues": [
+        "Foo.java:12 - Leftover Spring import: import org.springframework..."
+      ]
+    }
+  }
+}
 ```
 
 ### Run Tests (Verify Migration Logic)

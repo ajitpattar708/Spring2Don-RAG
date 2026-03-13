@@ -5,7 +5,11 @@ Configuration settings for the migration agent
 import os
 from typing import Optional
 from dataclasses import dataclass
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - exercised through import fallback tests
+    def load_dotenv(*args, **kwargs):
+        return False
 
 # Load environment variables from .env file
 load_dotenv()
@@ -48,7 +52,15 @@ class Settings:
     helidon_version: Optional[str] = None
     
     # Offline Mode
-    offline_mode: bool = False
+    offline_mode: bool = os.getenv('OFFLINE_MODE', 'false').lower() == 'true'
+
+    # GA Guardrails
+    require_kb: bool = os.getenv('REQUIRE_KB', 'true').lower() == 'true'
+    require_llm_consent: bool = os.getenv('REQUIRE_LLM_CONSENT', 'true').lower() == 'true'
+    llm_consent: str = os.getenv('LLM_CONSENT', '').lower()
+    llm_validation_strict: bool = os.getenv('LLM_VALIDATION_STRICT', 'true').lower() == 'true'
+    migration_report_path: str = os.getenv('MIGRATION_REPORT_PATH', 'migration_report.json')
+    datasource_name: str = os.getenv('DATASOURCE_NAME', 'myDS')
     
     def validate(self) -> bool:
         """Validate settings"""
@@ -58,5 +70,12 @@ class Settings:
             raise ValueError("ANTHROPIC_API_KEY is required when using Claude provider")
         if self.llm_provider == 'groq' and not self.groq_api_key:
             raise ValueError("GROQ_API_KEY is required when using Groq provider")
-        return True
 
+        # Enforce explicit consent for remote LLMs (GA safety)
+        if self.require_llm_consent and self.llm_provider in {'openai', 'claude', 'groq'}:
+            if self.llm_consent not in {'yes', 'true'}:
+                raise ValueError(
+                    "LLM_CONSENT must be set to 'yes' or 'true' to use remote LLM providers. "
+                    "Set REQUIRE_LLM_CONSENT=false to override."
+                )
+        return True

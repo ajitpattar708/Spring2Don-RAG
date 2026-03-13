@@ -5,13 +5,19 @@ Migrates configuration files from Spring Boot to Helidon MP
 
 from pathlib import Path
 from typing import Dict, List
-import yaml
+import re
 import sys
 import time
 from src.config.settings import Settings
 from src.rag.knowledge_base import KnowledgeBase
 from src.rag.embeddings import EmbeddingModel
-from src.utils.logger import setup_logger
+from src.rag.llm_provider import LLMProviderFactory
+from src.utils.logger import color_text, setup_logger
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - exercised through runtime fallback tests
+    yaml = None
 
 logger = setup_logger(__name__)
 
@@ -23,6 +29,7 @@ class ConfigAgent:
         self.settings = settings
         self.knowledge_base = KnowledgeBase(settings)
         self.embedding_model = EmbeddingModel(settings)
+        self.llm_provider = LLMProviderFactory.create(settings)
         self.source_path = None
         self.target_path = None
         
@@ -53,7 +60,7 @@ class ConfigAgent:
         total_configs = len(config_files)
         
         if total_configs > 0:
-            print(f"   Found {total_configs} configuration file(s) to migrate")
+            print(color_text(f"   Found {total_configs} configuration file(s) to migrate", "info"))
             sys.stdout.flush()
         
         for idx, config_file in enumerate(config_files, 1):
@@ -61,7 +68,7 @@ class ConfigAgent:
             file_name = config_file.name
             
             try:
-                print(f"   [{idx}/{total_configs}] Migrating: {file_name}...", end=' ', flush=True)
+                print(color_text(f"   [{idx}/{total_configs}] Migrating: {file_name}...", "info"), end=' ', flush=True)
                 sys.stdout.flush()
                 
                 result = self._migrate_config_file(config_file)
@@ -69,17 +76,17 @@ class ConfigAgent:
                 
                 if result['success']:
                     migrated_files.append(str(config_file))
-                    print(f"[OK] ({file_time:.1f}s)")
+                    print(color_text(f"[OK] ({file_time:.1f}s)", "ok"))
                 else:
                     error = result.get('error', 'Unknown error')
-                    print(f"[FAIL] ({file_time:.1f}s)")
-                    print(f"      Error: {error}")
+                    print(color_text(f"[FAIL] ({file_time:.1f}s)", "error"))
+                    print(color_text(f"      Error: {error}", "error"))
                     logger.error(f"Error migrating {config_file}: {error}")
                     
             except Exception as e:
                 file_time = time.time() - file_start_time
-                print(f"[EXCEPTION] ({file_time:.1f}s)")
-                print(f"      Exception: {type(e).__name__}: {str(e)}")
+                print(color_text(f"[EXCEPTION] ({file_time:.1f}s)", "error"))
+                print(color_text(f"      Exception: {type(e).__name__}: {str(e)}", "error"))
                 logger.error(f"Exception migrating {config_file}: {str(e)}", exc_info=True)
         
         return {
@@ -98,6 +105,10 @@ class ConfigAgent:
             Migration result for this file
         """
         logger.debug(f"Migrating config file: {config_file}")
+        project_root = self._find_project_root(config_file)
+        if project_root:
+            self.target_path = project_root
+            self.source_path = project_root
         
         file_extension = config_file.suffix.lower()
         
@@ -108,9 +119,21 @@ class ConfigAgent:
         else:
             logger.warning(f"Unsupported config file format: {file_extension}")
             return {'success': False, 'error': f'Unsupported format: {file_extension}'}
+
+    def _find_project_root(self, config_file: Path) -> Path | None:
+        """Find nearest project root (directory containing pom.xml)."""
+        current = config_file.resolve().parent
+        while current != current.parent:
+            if (current / 'pom.xml').exists():
+                return current
+            current = current.parent
+        return None
     
     def _migrate_yaml(self, yaml_file: Path) -> Dict:
         """Migrate YAML configuration to MicroProfile Config properties"""
+        if yaml is None:
+            return {'success': False, 'error': 'PyYAML is not installed'}
+
         try:
             # Read YAML file
             with open(yaml_file, 'r', encoding='utf-8') as f:
@@ -154,6 +177,18 @@ class ConfigAgent:
             # Read properties file
             with open(properties_file, 'r', encoding='utf-8') as f:
                 properties_content = f.read()
+            original_properties_content = properties_content
+
+            if 'spring.datasource.hikari.' in properties_content:
+                self.settings.datasource_name = self._infer_datasource_name(properties_content)
+
+            # LLM remediation: full Spring datasource/Hikari migration
+            if 'spring.datasource.hikari.' in properties_content:
+                llm_properties, inferred_name = self._llm_migrate_datasource_properties(properties_content)
+                if llm_properties:
+                    properties_content = llm_properties
+                if inferred_name:
+                    self.settings.datasource_name = inferred_name
             
             # TODO: Transform properties
             # 1. Map Spring Boot property keys to MicroProfile Config keys
@@ -161,6 +196,13 @@ class ConfigAgent:
             # 3. Update property values if needed
             
             transformed_properties = self._transform_properties(properties_content)
+            datasource_name = self.settings.datasource_name
+            if 'spring.datasource.hikari.' in original_properties_content:
+                transformed_properties = (
+                    f'# HikariCP (Helidon MP datasource: {datasource_name})\n'
+                    '# This configuration is for Hikari-backed javax.sql.DataSource\n'
+                    + transformed_properties
+                )
             
             # Post-process to ensure Jakarta namespaces
             transformed_properties = transformed_properties.replace('javax.', 'jakarta.')
@@ -174,22 +216,128 @@ class ConfigAgent:
             # Specific fixes
             transformed_properties = transformed_properties.replace('jakarta.sql.DataSource', 'javax.sql.DataSource')
             
-            # Write transformed properties to target directory
-            if self.target_path:
-                target_resources = self.target_path / 'src' / 'main' / 'resources'
-                target_resources.mkdir(parents=True, exist_ok=True)
-                target_properties_file = target_resources / 'microprofile-config.properties'
-                
-                with open(target_properties_file, 'w', encoding='utf-8') as f:
-                    f.write(transformed_properties)
-                
-                logger.info(f"Created MicroProfile Config: {target_properties_file}")
+            # Write transformed properties next to the source properties file
+            target_resources = properties_file.parent
+            target_resources.mkdir(parents=True, exist_ok=True)
+            target_properties_file = target_resources / 'microprofile-config.properties'
+
+            with open(target_properties_file, 'w', encoding='utf-8') as f:
+                f.write(transformed_properties)
+
+            logger.info(f"Created MicroProfile Config: {target_properties_file}")
+
+            # Remove original Spring properties file
+            if properties_file.exists():
+                try:
+                    properties_file.unlink()
+                    logger.info(f"Removed Spring config file: {properties_file}")
+                except Exception as e:
+                    logger.warning(f"Could not remove Spring config file: {str(e)}")
+                    # Attempt to make writable and retry
+                    try:
+                        properties_file.chmod(0o666)
+                        properties_file.unlink()
+                        logger.info(f"Removed Spring config file after chmod: {properties_file}")
+                    except Exception as retry_error:
+                        logger.warning(f"Still could not remove Spring config file: {str(retry_error)}")
             
             return {'success': True}
             
         except Exception as e:
             logger.error(f"Error migrating properties file: {str(e)}")
             return {'success': False, 'error': str(e)}
+
+    def _llm_migrate_datasource_properties(self, properties_content: str) -> tuple[str | None, str | None]:
+        """Use LLM to migrate Spring datasource properties to Helidon MP format."""
+        helidon_version = self.settings.helidon_version or "4.3.2"
+        prompt = f"""You are migrating Spring Boot datasource properties to Helidon MP {helidon_version}.
+Convert all spring.datasource.hikari.* properties to the correct Helidon MP datasource keys.
+Infer a datasource name (use pool-name if present) and use it in the keys.
+Return ONLY the transformed properties block and the datasource name on the first line as:
+DATASOURCE_NAME=<name>
+
+SOURCE:
+{properties_content}
+"""
+
+        try:
+            response = self.llm_provider.generate(prompt)
+            if not response:
+                return None, None
+
+            sanitized_properties, ds_name = self._extract_datasource_properties_from_llm_response(response)
+            if not sanitized_properties:
+                logger.warning("LLM datasource migration returned no usable properties; using deterministic mapping")
+                return None, None
+
+            if not self._is_valid_helidon_datasource_block(sanitized_properties):
+                logger.warning("LLM datasource migration returned invalid Helidon datasource keys; using deterministic mapping")
+                return None, None
+
+            return sanitized_properties, ds_name
+        except Exception as e:
+            logger.warning(f"LLM datasource migration failed: {str(e)}")
+            return None, None
+
+    def _extract_datasource_properties_from_llm_response(self, response: str) -> tuple[str | None, str | None]:
+        """Extract a clean properties block and datasource name from LLM output."""
+        code_block_match = re.search(r'```(?:properties|ini)?\s*(.*?)```', response, re.DOTALL)
+        candidate_text = code_block_match.group(1) if code_block_match else response
+
+        ds_name = None
+        explicit_name = re.search(r'DATASOURCE_NAME\s*=\s*([A-Za-z0-9_.-]+)', response)
+        if explicit_name:
+            ds_name = explicit_name.group(1)
+        else:
+            quoted_name = re.search(r'datasource name is ["\']?([A-Za-z0-9_.-]+)["\']?', response, re.IGNORECASE)
+            if quoted_name:
+                ds_name = quoted_name.group(1)
+
+        property_lines = []
+        for raw_line in candidate_text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith('```'):
+                continue
+            if line.startswith('DATASOURCE_NAME='):
+                if not ds_name:
+                    ds_name = line.split('=', 1)[1].strip()
+                continue
+            if line.startswith('#'):
+                property_lines.append(line)
+                continue
+            if re.match(r'^[A-Za-z0-9_.-]+\s*=', line):
+                property_lines.append(line)
+
+        if ds_name:
+            ds_name = re.sub(r'[^A-Za-z0-9_.-]', '_', ds_name)
+
+        if not property_lines:
+            return None, ds_name
+
+        return '\n'.join(property_lines), ds_name
+
+    def _is_valid_helidon_datasource_block(self, properties_block: str) -> bool:
+        """Ensure LLM datasource output is valid Helidon datasource config."""
+        property_lines = [
+            line.strip() for line in properties_block.splitlines()
+            if line.strip() and not line.strip().startswith('#')
+        ]
+        if not property_lines:
+            return False
+
+        return any(line.startswith('javax.sql.DataSource.') for line in property_lines)
+
+    def _infer_datasource_name(self, properties_content: str) -> str:
+        """Infer datasource name from source properties, falling back to configured default."""
+        pool_name_match = re.search(r'^\s*spring\.datasource\.hikari\.pool-name\s*=\s*(.+?)\s*$', properties_content, re.MULTILINE)
+        if pool_name_match:
+            return re.sub(r'[^A-Za-z0-9_.-]', '_', pool_name_match.group(1).strip())
+
+        datasource_name_match = re.search(r'^\s*spring\.datasource\.name\s*=\s*(.+?)\s*$', properties_content, re.MULTILINE)
+        if datasource_name_match:
+            return re.sub(r'[^A-Za-z0-9_.-]', '_', datasource_name_match.group(1).strip())
+
+        return self.settings.datasource_name
     
     def _yaml_to_properties(self, yaml_data: dict, prefix: str = '') -> list:
         """Convert YAML structure to properties format - returns list of lines"""
@@ -238,6 +386,35 @@ class ConfigAgent:
         Uses RAG to find the best mapping
         """
         try:
+            # Dedicated Spring datasource → Helidon datasource mappings
+            if spring_key.startswith('spring.datasource.hikari.'):
+                datasource_name = self.settings.datasource_name
+                hikari_key = spring_key.replace('spring.datasource.hikari.', '')
+                hikari_map = {
+                    'jdbc-url': f'javax.sql.DataSource.{datasource_name}.jdbcUrl',
+                    'driver-class-name': f'javax.sql.DataSource.{datasource_name}.driverClassName',
+                    'username': f'javax.sql.DataSource.{datasource_name}.username',
+                    'password': f'javax.sql.DataSource.{datasource_name}.password',
+                    'maximum-pool-size': f'javax.sql.DataSource.{datasource_name}.maximumPoolSize',
+                    'minimum-idle': f'javax.sql.DataSource.{datasource_name}.minimumIdle',
+                    'connection-timeout': f'javax.sql.DataSource.{datasource_name}.connectionTimeout',
+                    'idle-timeout': f'javax.sql.DataSource.{datasource_name}.idleTimeout',
+                    'max-lifetime': f'javax.sql.DataSource.{datasource_name}.maxLifetime',
+                    'pool-name': f'javax.sql.DataSource.{datasource_name}.poolName',
+                    'connection-test-query': f'javax.sql.DataSource.{datasource_name}.connectionTestQuery',
+                    'leak-detection-threshold': f'javax.sql.DataSource.{datasource_name}.leakDetectionThreshold'
+                }
+                # Handle data-source-properties.* -> dataSourceProperties.*
+                if hikari_key.startswith('data-source-properties.'):
+                    prop_suffix = hikari_key.replace('data-source-properties.', '')
+                    return f"javax.sql.DataSource.{datasource_name}.dataSourceProperties.{prop_suffix}"
+                if hikari_key in hikari_map:
+                    return hikari_map[hikari_key]
+
+            if spring_key.startswith('spring.jpa.properties.'):
+                jpa_key = spring_key.replace('spring.jpa.properties.', '')
+                return f"jakarta.persistence.{jpa_key}"
+
             # Generate embedding for property key
             query_text = f"Spring Boot property: {spring_key}"
             embedding = self.embedding_model.encode_single(query_text)
@@ -266,20 +443,26 @@ class ConfigAgent:
                 metadata = best_match.get('metadata', {})
                 spring_pattern = metadata.get('spring_pattern', '')
                 
-                # Check if this key matches the pattern
-                if spring_pattern in spring_key or spring_key.startswith(spring_pattern.split('.')[0]):
+                # Only map on exact or prefix match to avoid collisions
+                if spring_key == spring_pattern or spring_key.startswith(f"{spring_pattern}."):
                     helidon_pattern = metadata.get('helidon_pattern', '')
                     if helidon_pattern:
-                        # Extract the mapped key
+                        # Preserve suffix after pattern if present
+                        if spring_key.startswith(f"{spring_pattern}."):
+                            suffix = spring_key[len(spring_pattern) + 1:]
+                            return f"{helidon_pattern}.{suffix}"
                         return helidon_pattern
             
             # Minimal fallback only if vector DB search completely fails
             # This should rarely happen if vector DB is properly initialized
-            logger.warning(f"No mapping found in vector DB for: {spring_key}, using fallback")
+            if self._should_warn_for_missing_property_mapping(spring_key):
+                logger.warning(f"No mapping found in vector DB for: {spring_key}, using fallback")
             
             # Only keep critical fallbacks for common properties
             critical_fallbacks = {
-                'server.port': 'server.port',  # Same in both
+                'server.port': 'server.port',
+                'management.server.port': 'management.server.port',
+                'server.shutdown': 'server.shutdown',
             }
             
             if spring_key in critical_fallbacks:
@@ -291,6 +474,48 @@ class ConfigAgent:
         except Exception as e:
             logger.error(f"Error mapping property key: {str(e)}")
             return spring_key
+
+    def _should_warn_for_missing_property_mapping(self, spring_key: str) -> bool:
+        """Warn only for framework-owned keys where a missing mapping is actionable."""
+        key = (spring_key or '').strip()
+        if not key:
+            return False
+
+        framework_prefixes = (
+            'spring.',
+            'management.',
+            'server.',
+        )
+        if key.startswith(framework_prefixes):
+            quiet_framework_keys = {
+                'server.port',
+                'server.shutdown',
+                'management.server.port',
+                'management.metrics.tags.application',
+            }
+            quiet_framework_prefixes = (
+                'logging.',
+                'info.',
+            )
+            if key in quiet_framework_keys or key.startswith(quiet_framework_prefixes):
+                return False
+            return True
+
+        # App-owned or organization-owned keys are usually pass-through config, not migration misses.
+        quiet_custom_prefixes = (
+            'app.',
+            'cache.',
+            'cxunity.',
+            'dataSource.',
+            'db.',
+            'http.',
+            'idcs.',
+            'oudp.',
+        )
+        if key.startswith(quiet_custom_prefixes):
+            return False
+
+        return False
     
     def _transform_properties(self, properties_content: str) -> str:
         """Transform properties content"""
@@ -314,4 +539,3 @@ class ConfigAgent:
                 transformed_lines.append(line)
                 
         return '\n'.join(transformed_lines)
-

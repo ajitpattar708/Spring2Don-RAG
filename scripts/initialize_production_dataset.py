@@ -29,6 +29,8 @@ def main():
     
     # Generate dataset
     dataset_file = project_root / "migration_dataset_production.json"
+    enterprise_dataset_file = project_root / "migration_dataset_enterprise_patterns.json"
+    proxy_gateway_dataset_file = project_root / "migration_dataset_proxy_gateway_patterns.json"
     
     print(f"\n[1/3] Generating production dataset...")
     generator = ProductionDatasetGenerator()
@@ -41,12 +43,17 @@ def main():
     print(f"   ✓ File size: {dataset_file.stat().st_size / (1024*1024):.2f} MB")
     
     # Load dataset into ChromaDB
-    print(f"\n[2/3] Loading dataset into ChromaDB...")
+    print(f"\n[2/3] Loading datasets into ChromaDB...")
     loader = DatasetLoader(settings)
     
     try:
-        loader.initialize_knowledge_base(dataset_file)
-        print(f"   ✓ Dataset loaded into ChromaDB")
+        loader.initialize_knowledge_base(
+            dataset_file,
+            extra_dataset_files=[enterprise_dataset_file, proxy_gateway_dataset_file]
+        )
+        print(f"   ✓ Production dataset loaded: {dataset_file}")
+        print(f"   ✓ Enterprise seed dataset loaded: {enterprise_dataset_file}")
+        print(f"   ✓ Proxy/gateway seed dataset loaded: {proxy_gateway_dataset_file}")
     except Exception as e:
         logger.error(f"Failed to load dataset: {str(e)}")
         print(f"   ✗ Failed to load dataset: {str(e)}")
@@ -75,4 +82,3 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
-
